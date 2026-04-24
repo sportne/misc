@@ -1,15 +1,142 @@
 plugins {
-    id 'java'
+	id 'java'
+	id 'checkstyle'
+	id 'jacoco'
+	id 'com.diffplug.spotless' version '7.0.2'
+	id 'com.github.spotbugs' version '6.0.27'
 }
 
 repositories {
-    mavenCentral()
+	mavenCentral()
 }
 
 dependencies {
-    testImplementation libs.junit
+	testImplementation libs.junit
+}
+
+jacoco {
+	toolVersion = '0.8.12'
+}
+
+test {
+	finalizedBy jacocoTestReport
+}
+
+jacocoTestReport {
+	dependsOn test
+	reports {
+		xml.required = true
+		html.required = true
+	}
+}
+
+jacocoTestCoverageVerification {
+	dependsOn test
+	violationRules {
+		rule {
+			limit {
+				counter = 'LINE'
+				value = 'COVEREDRATIO'
+				minimum = 0.85
+			}
+		}
+	}
+}
+
+spotless {
+	java {
+		googleJavaFormat('1.18.1')
+		target 'src/*/java/**/*.java'
+	}
+}
+
+spotbugs {
+	effort = com.github.spotbugs.snom.Effort.MAX
+	reportLevel = com.github.spotbugs.snom.Confidence.valueOf('LOW')
+	ignoreFailures = false
+}
+
+def generatedJavaSpotbugsSourcesDir = layout.buildDirectory.dir('generated/spotbugs/java-sources')
+def generatedJavaSpotbugsClassesDir = layout.buildDirectory.dir('generated/spotbugs/java-classes')
+
+def cleanGeneratedJavaSourcesForSpotbugs = tasks.register('cleanGeneratedJavaSourcesForSpotbugs', Delete) {
+	delete(generatedJavaSpotbugsSourcesDir)
+}
+
+tasks.register('generateJavaSourcesForSpotbugs', JavaExec) {
+	description = 'Generates interpolator Java sources for strict SpotBugs analysis.'
+	group = 'verification'
+	dependsOn classes
+	dependsOn cleanGeneratedJavaSourcesForSpotbugs
+	mainClass = 'io.github.sportne.misc.InterpolatorSourceGenerator'
+	classpath = sourceSets.main.runtimeClasspath
+	args(
+			generatedJavaSpotbugsSourcesDir.get().asFile.absolutePath,
+			'generated.interpolation',
+			'5'
+			)
+	outputs.dir(generatedJavaSpotbugsSourcesDir)
+}
+
+tasks.register('compileGeneratedJavaForSpotbugs', JavaCompile) {
+	description = 'Compiles generated interpolator sources used by strict SpotBugs analysis.'
+	group = 'verification'
+	dependsOn tasks.named('generateJavaSourcesForSpotbugs')
+	source = fileTree(generatedJavaSpotbugsSourcesDir) {
+		include '**/*.java'
+	}
+	classpath = files()
+	destinationDirectory = generatedJavaSpotbugsClassesDir
+	options.release = 11
+	options.encoding = 'UTF-8'
+}
+
+tasks.register('spotbugsGeneratedJava', com.github.spotbugs.snom.SpotBugsTask) {
+	description = 'Runs strict SpotBugs analysis on generated interpolator classes.'
+	group = 'verification'
+	dependsOn tasks.named('compileGeneratedJavaForSpotbugs')
+	classes = files(tasks.named('compileGeneratedJavaForSpotbugs').map { it.destinationDirectory })
+	sourceDirs = files(generatedJavaSpotbugsSourcesDir)
+	auxClassPaths = files()
+	effort = com.github.spotbugs.snom.Effort.MAX
+	reportLevel = com.github.spotbugs.snom.Confidence.valueOf('LOW')
+	ignoreFailures = false
+	reports {
+		html.required = true
+		xml.required = false
+	}
+}
+
+checkstyle {
+	toolVersion = '10.17.0'
+	configFile = rootProject.file('config/checkstyle/checkstyle.xml')
+	ignoreFailures = false
+}
+
+tasks.withType(com.github.spotbugs.snom.SpotBugsTask).configureEach {
+	reports {
+		html.required = true
+		xml.required = false
+	}
+}
+
+tasks.withType(org.gradle.api.plugins.quality.Checkstyle).configureEach {
+	reports {
+		xml.required = false
+		html.required = true
+	}
 }
 
 tasks.withType(JavaCompile).configureEach {
-    options.release = 11
+	options.release = 11
+}
+
+check {
+	dependsOn spotlessCheck
+	dependsOn jacocoTestCoverageVerification
+	dependsOn spotbugsMain
+	dependsOn spotbugsTest
+	dependsOn spotbugsGeneratedJava
+	dependsOn checkstyleMain
+	dependsOn checkstyleTest
 }

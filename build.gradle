@@ -1,3 +1,36 @@
 plugins {
-    id 'base'
+	id 'base'
+	id 'com.diffplug.spotless' version '7.0.2'
+}
+
+def localScratchOutputDir = layout.projectDirectory.dir('.tmp')
+
+allprojects {
+	group = 'io.github.sportne'
+	version = '0.1.0'
+}
+
+repositories {
+	mavenCentral()
+}
+
+spotless {
+	groovyGradle {
+		target 'build.gradle', 'settings.gradle', 'lib/build.gradle'
+		greclipse()
+	}
+
+	format('misc') {
+		target '.gitignore', '.gitattributes', 'README.md'
+		trimTrailingWhitespace()
+		endWithNewline()
+	}
+}
+
+check {
+	dependsOn spotlessCheck
+}
+
+tasks.named('clean') {
+	delete(localScratchOutputDir)
 }
