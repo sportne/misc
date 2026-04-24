@@ -105,15 +105,22 @@ public class InterpolatorSourceGeneratorTest {
     GeneratedProject project = generateAndCompile(5);
     Class<?> interpolators = project.loadClass("Interpolators");
 
+    // This is the primary interpolation-correctness test. It creates every generated
+    // implementation class from 1D through 5D, then compares each result with the
+    // independent referenceInterpolate(...) helper below.
     for (int dimension = 1; dimension <= 5; dimension++) {
       int classCount = 1 << dimension;
       for (int mask = 0; mask < classCount; mask++) {
+        // Each mask bit controls whether that axis is uniform or non-uniform, so this
+        // loop covers Interpolator2D_NU, Interpolator5D_UUNNU, and every sibling.
         double[][] axes = axesForMask(dimension, mask);
         double[] values = valuesForAxes(axes);
         Object interpolator = createFlat(interpolators, dimension, axes, values);
 
         assertEquals(implementationName(dimension, mask), interpolator.getClass().getSimpleName());
 
+        // Exercise the common interpolation paths: inside a cell, exactly on grid
+        // coordinates, and outside the grid where generated interpolators clamp.
         assertInterpolationMatchesReference(
             project, interpolator, axes, values, firstCellMidpoint(axes));
         assertInterpolationMatchesReference(
@@ -302,6 +309,7 @@ public class InterpolatorSourceGeneratorTest {
       double[] values,
       double[] point)
       throws Exception {
+    // All generated interpolation calls funnel through here during correctness tests.
     assertEquals(
         referenceInterpolate(axes, values, point),
         invokeTypedInterpolate(project, interpolator, axes.length, point),
@@ -336,6 +344,8 @@ public class InterpolatorSourceGeneratorTest {
     return values;
   }
 
+  // Deterministic grid data for interpolation tests. The values vary by every axis,
+  // so swapped strides, wrong flattening, or missing corner weights are visible.
   private static double sampleValue(double[][] axes, int[] indices) {
     double value = 7.0;
     for (int axis = 0; axis < axes.length; axis++) {
@@ -381,6 +391,8 @@ public class InterpolatorSourceGeneratorTest {
     return point;
   }
 
+  // Independent, loop-based multilinear interpolation oracle. It deliberately does
+  // not reuse generated code, so a mismatch points at generated lookup/blending logic.
   private static double referenceInterpolate(double[][] axes, double[] values, double[] point) {
     int dimension = axes.length;
     int[] lower = new int[dimension];
