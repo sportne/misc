@@ -14,8 +14,6 @@ import java.net.URL;
 import java.net.URLClassLoader;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.AccessController;
-import java.security.PrivilegedAction;
 import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Collectors;
@@ -26,6 +24,8 @@ import javax.tools.ToolProvider;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+import org.junit.runner.JUnitCore;
+import org.junit.runner.Result;
 
 public class InterpolatorSourceGeneratorTest {
 
@@ -48,6 +48,70 @@ public class InterpolatorSourceGeneratorTest {
     Class<?> interpolators = project.loadClass("Interpolators");
     assertNotNull(interpolators.getMethod("flatten5D", double[][][][][].class));
     assertNotNull(interpolators.getMethod("create5D", double[][].class, double[][][][][].class));
+  }
+
+  @Test
+  public void generatesCompilesAndRunsOptionalJUnitTests() throws Exception {
+    Path sourceRoot = temporaryFolder.newFolder("generated-src-with-tests").toPath();
+    Path testSourceRoot = temporaryFolder.newFolder("generated-test-src").toPath();
+    Path classes = temporaryFolder.newFolder("generated-classes-with-tests").toPath();
+    Path testClasses = temporaryFolder.newFolder("generated-test-classes").toPath();
+
+    InterpolatorSourceGenerator.main(
+        new String[] {
+          sourceRoot.toString(), GENERATED_PACKAGE, "5", "--tests", testSourceRoot.toString()
+        });
+
+    List<Path> productionSources = javaSources(sourceRoot);
+    List<Path> testSources = javaSources(testSourceRoot);
+    assertEquals(70, productionSources.size());
+    assertEquals(1, testSources.size());
+    assertTrue(
+        Files.isRegularFile(
+            testSourceRoot
+                .resolve(GENERATED_PACKAGE.replace('.', File.separatorChar))
+                .resolve("InterpolatorsGeneratedTest.java")));
+
+    compileSources(productionSources, classes, null);
+    compileSources(
+        testSources,
+        testClasses,
+        classes.toString() + File.pathSeparator + System.getProperty("java.class.path"));
+
+    URL[] urls = new URL[] {testClasses.toUri().toURL(), classes.toUri().toURL()};
+    try (URLClassLoader classLoader = new URLClassLoader(urls, getClass().getClassLoader())) {
+      Class<?> generatedTestClass =
+          classLoader.loadClass(GENERATED_PACKAGE + ".InterpolatorsGeneratedTest");
+      Result result = JUnitCore.runClasses(generatedTestClass);
+      assertTrue(result.getFailures().toString(), result.wasSuccessful());
+      assertEquals(2, result.getRunCount());
+    }
+  }
+
+  @Test
+  public void generatedSourcesContainRepresentativeJavadocs() throws Exception {
+    GeneratedProject project = generateAndCompile(2);
+
+    String interpolator = readGeneratedSource(project, "Interpolator.java");
+    assertTrue(interpolator.contains("@return the dimensionality of this interpolator"));
+    assertTrue(interpolator.contains("@param coordinates coordinates in axis order"));
+
+    String interpolators = readGeneratedSource(project, "Interpolators.java");
+    assertTrue(
+        interpolators.contains("* Factory and flattening helpers for generated interpolators."));
+    assertTrue(interpolators.contains("@param axes coordinate axes in axis order"));
+    assertTrue(interpolators.contains("@return a typed 2D interpolator"));
+
+    String implementation = readGeneratedSource(project, "Interpolator2D_UN.java");
+    assertTrue(implementation.contains("/** Flattened grid values in sorted axis order. */"));
+    assertTrue(implementation.contains("@param axes sorted axes in axis order"));
+    assertTrue(implementation.contains("@param x coordinate for axis 0"));
+    assertTrue(
+        implementation.contains("@return the interpolated value, clamped to the grid bounds"));
+
+    String support = readGeneratedSource(project, "InterpolationSupport.java");
+    assertTrue(support.contains("@param dimensions expected number of axes"));
+    assertTrue(support.contains("/** Sorted axis values. */"));
   }
 
   @Test
@@ -233,6 +297,13 @@ public class InterpolatorSourceGeneratorTest {
         new String[] {sourceRoot.toString(), GENERATED_PACKAGE, Integer.toString(maxDimension)});
 
     List<Path> sources = javaSources(sourceRoot);
+    compileSources(sources, classes, null);
+
+    return new GeneratedProject(sourceRoot, classes);
+  }
+
+  private static void compileSources(List<Path> sources, Path classes, String classpath)
+      throws Exception {
     JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
     assertNotNull("Tests must run on a JDK, not a JRE", compiler);
 
@@ -240,13 +311,14 @@ public class InterpolatorSourceGeneratorTest {
       Iterable<? extends javax.tools.JavaFileObject> compilationUnits =
           fileManager.getJavaFileObjectsFromFiles(
               sources.stream().map(Path::toFile).collect(Collectors.toList()));
-      List<String> options = Arrays.asList("--release", "11", "-d", classes.toString());
+      List<String> options =
+          classpath == null
+              ? Arrays.asList("--release", "11", "-d", classes.toString())
+              : Arrays.asList("--release", "11", "-classpath", classpath, "-d", classes.toString());
       Boolean success =
           compiler.getTask(null, fileManager, null, options, null, compilationUnits).call();
       assertEquals(Boolean.TRUE, success);
     }
-
-    return new GeneratedProject(sourceRoot, classes);
   }
 
   private static long countJavaSources(Path sourceRoot) throws Exception {
@@ -266,6 +338,16 @@ public class InterpolatorSourceGeneratorTest {
             .resolve(GENERATED_PACKAGE.replace('.', File.separatorChar))
             .resolve(fileName);
     assertTrue("Expected generated file " + path, Files.isRegularFile(path));
+  }
+
+  private static String readGeneratedSource(GeneratedProject project, String fileName)
+      throws Exception {
+    Path path =
+        project
+            .sourceRoot
+            .resolve(GENERATED_PACKAGE.replace('.', File.separatorChar))
+            .resolve(fileName);
+    return new String(Files.readAllBytes(path), java.nio.charset.StandardCharsets.UTF_8);
   }
 
   private static double[] flatten(Class<?> interpolators, int dimension, Object values)
@@ -531,9 +613,7 @@ public class InterpolatorSourceGeneratorTest {
     GeneratedProject(Path sourceRoot, Path classes) throws Exception {
       this.sourceRoot = sourceRoot;
       URL[] urls = new URL[] {classes.toUri().toURL()};
-      this.classLoader =
-          AccessController.doPrivileged(
-              (PrivilegedAction<URLClassLoader>) () -> new URLClassLoader(urls));
+      this.classLoader = new URLClassLoader(urls);
     }
 
     Class<?> loadClass(String simpleName) throws Exception {

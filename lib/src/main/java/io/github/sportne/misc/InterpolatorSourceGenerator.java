@@ -30,32 +30,38 @@ public final class InterpolatorSourceGenerator {
   private final String packageName;
   private final int maxDimension;
   private final Path packageDirectory;
+  private final Path testPackageDirectory;
 
   public static void main(String[] args) throws IOException {
-    Path sourceRoot = args.length >= 1 ? Paths.get(args[0]) : Paths.get("generated-src");
-    String packageName = args.length >= 2 ? args[1] : "generated.interpolation";
-    int maxDimension = args.length >= 3 ? Integer.parseInt(args[2]) : 4;
+    GenerationOptions options = GenerationOptions.parse(args);
 
-    if (maxDimension < 1) {
+    if (options.maxDimension < 1) {
       throw new IllegalArgumentException("maxDimension must be at least 1");
     }
-    if (maxDimension > COORD_NAMES.length) {
+    if (options.maxDimension > COORD_NAMES.length) {
       throw new IllegalArgumentException("maxDimension may not exceed " + COORD_NAMES.length);
     }
 
     InterpolatorSourceGenerator generator =
-        new InterpolatorSourceGenerator(sourceRoot, packageName, maxDimension);
+        new InterpolatorSourceGenerator(
+            options.sourceRoot, options.packageName, options.maxDimension, options.testSourceRoot);
     generator.generateAll();
   }
 
-  private InterpolatorSourceGenerator(Path sourceRoot, String packageName, int maxDimension) {
+  private InterpolatorSourceGenerator(
+      Path sourceRoot, String packageName, int maxDimension, Path testSourceRoot) {
     this.packageName = packageName;
     this.maxDimension = maxDimension;
     this.packageDirectory = sourceRoot.resolve(packageName.replace('.', '/'));
+    this.testPackageDirectory =
+        testSourceRoot == null ? null : testSourceRoot.resolve(packageName.replace('.', '/'));
   }
 
   private void generateAll() throws IOException {
     Files.createDirectories(packageDirectory);
+    if (testPackageDirectory != null) {
+      Files.createDirectories(testPackageDirectory);
+    }
 
     writeSource("Interpolator", generateBaseInterpolator());
     writeSource("InterpolationSupport", generateSupport());
@@ -70,6 +76,10 @@ public final class InterpolatorSourceGenerator {
         writeSource(className, generateImplementation(dimension, mask));
       }
     }
+
+    if (testPackageDirectory != null) {
+      writeTestSource("InterpolatorsGeneratedTest", generateGeneratedTest());
+    }
   }
 
   private void writeSource(String className, String source) throws IOException {
@@ -78,8 +88,55 @@ public final class InterpolatorSourceGenerator {
     System.out.println("Wrote " + file);
   }
 
+  private void writeTestSource(String className, String source) throws IOException {
+    Path file = testPackageDirectory.resolve(className + ".java");
+    Files.write(file, source.getBytes(StandardCharsets.UTF_8));
+    System.out.println("Wrote " + file);
+  }
+
   private String packageLine() {
     return "package " + packageName + ";\n\n";
+  }
+
+  private static final class GenerationOptions {
+    final Path sourceRoot;
+    final String packageName;
+    final int maxDimension;
+    final Path testSourceRoot;
+
+    private GenerationOptions(
+        Path sourceRoot, String packageName, int maxDimension, Path testSourceRoot) {
+      this.sourceRoot = sourceRoot;
+      this.packageName = packageName;
+      this.maxDimension = maxDimension;
+      this.testSourceRoot = testSourceRoot;
+    }
+
+    static GenerationOptions parse(String[] args) {
+      Path sourceRoot = args.length >= 1 ? Paths.get(args[0]) : Paths.get("generated-src");
+      String packageName = args.length >= 2 ? args[1] : "generated.interpolation";
+      int maxDimension = args.length >= 3 ? Integer.parseInt(args[2]) : 4;
+      Path testSourceRoot = null;
+
+      int index = Math.min(args.length, 3);
+      while (index < args.length) {
+        String option = args[index];
+        if ("--tests".equals(option)) {
+          if (index + 1 >= args.length) {
+            throw new IllegalArgumentException("--tests requires a test source root");
+          }
+          if (testSourceRoot != null) {
+            throw new IllegalArgumentException("--tests may only be specified once");
+          }
+          testSourceRoot = Paths.get(args[index + 1]);
+          index += 2;
+        } else {
+          throw new IllegalArgumentException("Unknown option: " + option);
+        }
+      }
+
+      return new GenerationOptions(sourceRoot, packageName, maxDimension, testSourceRoot);
+    }
   }
 
   private String generateBaseInterpolator() {
@@ -92,7 +149,19 @@ public final class InterpolatorSourceGenerator {
     sb.append(" * The varargs method is convenient but less optimal for tight loops.\n");
     sb.append(" */\n");
     sb.append("public interface Interpolator {\n");
+    sb.append("    /**\n");
+    sb.append("     * Returns the number of coordinate axes accepted by this interpolator.\n");
+    sb.append("     *\n");
+    sb.append("     * @return the dimensionality of this interpolator\n");
+    sb.append("     */\n");
     sb.append("    int dimensions();\n\n");
+    sb.append("    /**\n");
+    sb.append("     * Interpolates a value at the supplied coordinates.\n");
+    sb.append("     *\n");
+    sb.append("     * @param coordinates coordinates in axis order\n");
+    sb.append("     * @return the interpolated value, clamped to the grid bounds\n");
+    sb.append("     * @throws IllegalArgumentException if the coordinate count is invalid\n");
+    sb.append("     */\n");
     sb.append("    double interpolate(double... coordinates);\n");
     sb.append("}\n");
     return sb.toString();
@@ -101,16 +170,35 @@ public final class InterpolatorSourceGenerator {
   private String generateDimensionInterface(int dimension) {
     StringBuilder sb = new StringBuilder();
     sb.append(packageLine());
+    sb.append("/**\n");
+    sb.append(" * Typed ").append(dimension).append("D interpolator interface.\n");
+    sb.append(" */\n");
     sb.append("public interface ")
         .append(interfaceName(dimension))
         .append(" extends Interpolator {\n");
+    appendTypedInterpolateJavadocs(sb, "    ", dimension);
     sb.append("    ").append(typedMethodSignature(dimension)).append(";\n\n");
 
+    sb.append("    /**\n");
+    sb.append("     * Returns this interface dimensionality.\n");
+    sb.append("     *\n");
+    sb.append("     * @return ").append(dimension).append("\n");
+    sb.append("     */\n");
     sb.append("    @Override\n");
     sb.append("    default int dimensions() {\n");
     sb.append("        return ").append(dimension).append(";\n");
     sb.append("    }\n\n");
 
+    sb.append("    /**\n");
+    sb.append("     * Interpolates using a varargs coordinate array.\n");
+    sb.append("     *\n");
+    sb.append("     * @param coordinates exactly ")
+        .append(dimension)
+        .append(" coordinate values\n");
+    sb.append("     * @return the interpolated value, clamped to the grid bounds\n");
+    sb.append(
+        "     * @throws IllegalArgumentException if coordinates is null or has the wrong length\n");
+    sb.append("     */\n");
     sb.append("    @Override\n");
     sb.append("    default double interpolate(double... coordinates) {\n");
     sb.append("        if (coordinates == null || coordinates.length != ")
@@ -120,14 +208,15 @@ public final class InterpolatorSourceGenerator {
         .append(dimension)
         .append(" coordinates\");\n");
     sb.append("        }\n");
-    sb.append("        return interpolate(");
+    sb.append("        return interpolate(\n");
     for (int axis = 0; axis < dimension; axis++) {
-      if (axis > 0) {
-        sb.append(", ");
+      sb.append("            coordinates[").append(axis).append("]");
+      if (axis + 1 < dimension) {
+        sb.append(",");
       }
-      sb.append("coordinates[").append(axis).append("]");
+      sb.append("\n");
     }
-    sb.append(");\n");
+    sb.append("        );\n");
     sb.append("    }\n\n");
 
     appendBatchMethod(sb, dimension);
@@ -137,6 +226,19 @@ public final class InterpolatorSourceGenerator {
   }
 
   private void appendBatchMethod(StringBuilder sb, int dimension) {
+    sb.append("    /**\n");
+    sb.append("     * Interpolates batches of coordinates into the output array.\n");
+    sb.append("     *\n");
+    for (int axis = 0; axis < dimension; axis++) {
+      sb.append("     * @param ")
+          .append(arrayName(axis))
+          .append(" coordinate values for axis ")
+          .append(axis)
+          .append("\n");
+    }
+    sb.append("     * @param out destination for interpolated values\n");
+    sb.append("     * @throws IllegalArgumentException if any array is null or lengths differ\n");
+    sb.append("     */\n");
     sb.append("    default void interpolate(\n");
     for (int axis = 0; axis < dimension; axis++) {
       sb.append("        double[] ").append(arrayName(axis)).append(",\n");
@@ -147,11 +249,11 @@ public final class InterpolatorSourceGenerator {
     sb.append("        if (");
     for (int axis = 0; axis < dimension; axis++) {
       if (axis > 0) {
-        sb.append(" || ");
+        sb.append("\n            || ");
       }
       sb.append(arrayName(axis)).append(" == null");
     }
-    sb.append(" || out == null) {\n");
+    sb.append("\n            || out == null) {\n");
     sb.append(
         "            throw new IllegalArgumentException(\"Input and output arrays must not be null\");\n");
     sb.append("        }\n\n");
@@ -161,13 +263,13 @@ public final class InterpolatorSourceGenerator {
     boolean wroteLengthCheck = false;
     for (int axis = 1; axis < dimension; axis++) {
       if (wroteLengthCheck) {
-        sb.append(" || ");
+        sb.append("\n            || ");
       }
       sb.append(arrayName(axis)).append(".length != count");
       wroteLengthCheck = true;
     }
     if (wroteLengthCheck) {
-      sb.append(" || ");
+      sb.append("\n            || ");
     }
     sb.append("out.length != count) {\n");
     sb.append(
@@ -175,14 +277,15 @@ public final class InterpolatorSourceGenerator {
     sb.append("        }\n\n");
 
     sb.append("        for (int i = 0; i < count; i++) {\n");
-    sb.append("            out[i] = interpolate(");
+    sb.append("            out[i] = interpolate(\n");
     for (int axis = 0; axis < dimension; axis++) {
-      if (axis > 0) {
-        sb.append(", ");
+      sb.append("                ").append(arrayName(axis)).append("[i]");
+      if (axis + 1 < dimension) {
+        sb.append(",");
       }
-      sb.append(arrayName(axis)).append("[i]");
+      sb.append("\n");
     }
-    sb.append(");\n");
+    sb.append("            );\n");
     sb.append("        }\n");
     sb.append("    }\n");
   }
@@ -190,12 +293,24 @@ public final class InterpolatorSourceGenerator {
   private String generateFactory() {
     StringBuilder sb = new StringBuilder();
     sb.append(packageLine());
+    sb.append("/**\n");
+    sb.append(" * Factory and flattening helpers for generated interpolators.\n");
+    sb.append(" */\n");
     sb.append("public final class Interpolators {\n\n");
+    sb.append("    /**\n");
+    sb.append("     * Prevents instantiation of this utility class.\n");
+    sb.append("     */\n");
     sb.append("    private Interpolators() {}\n\n");
 
     sb.append("    /**\n");
     sb.append("     * Type-erased factory for callers that only know the dimension at runtime.\n");
     sb.append("     * For hot code, prefer the dimension-specific overloads below.\n");
+    sb.append("     *\n");
+    sb.append("     * @param axes coordinate axes in axis order\n");
+    sb.append("     * @param values flattened grid values in axis0-fastest order\n");
+    sb.append("     * @return a generated interpolator for the supplied dimension\n");
+    sb.append(
+        "     * @throws IllegalArgumentException if axes is null or has an unsupported length\n");
     sb.append("     */\n");
     sb.append("    public static Interpolator create(double[][] axes, double[] values) {\n");
     sb.append("        if (axes == null) {\n");
@@ -231,6 +346,22 @@ public final class InterpolatorSourceGenerator {
   }
 
   private void appendTypedFactoryOverload(StringBuilder sb, int dimension) {
+    sb.append("    /**\n");
+    sb.append("     * Creates a typed ")
+        .append(dimension)
+        .append("D interpolator from separate axes.\n");
+    sb.append("     *\n");
+    for (int axis = 0; axis < dimension; axis++) {
+      sb.append("     * @param ")
+          .append(COORD_NAMES[axis])
+          .append(" coordinate axis ")
+          .append(axis)
+          .append("\n");
+    }
+    sb.append("     * @param values flattened grid values in axis0-fastest order\n");
+    sb.append("     * @return a typed ").append(dimension).append("D interpolator\n");
+    sb.append("     * @throws IllegalArgumentException if axes or values are invalid\n");
+    sb.append("     */\n");
     sb.append("    public static ").append(interfaceName(dimension)).append(" create(");
     for (int axis = 0; axis < dimension; axis++) {
       if (axis > 0) {
@@ -251,6 +382,22 @@ public final class InterpolatorSourceGenerator {
   }
 
   private void appendTypedMultidimensionalFactoryOverload(StringBuilder sb, int dimension) {
+    sb.append("    /**\n");
+    sb.append("     * Creates a typed ")
+        .append(dimension)
+        .append("D interpolator from separate axes and nested values.\n");
+    sb.append("     *\n");
+    for (int axis = 0; axis < dimension; axis++) {
+      sb.append("     * @param ")
+          .append(COORD_NAMES[axis])
+          .append(" coordinate axis ")
+          .append(axis)
+          .append("\n");
+    }
+    sb.append("     * @param values rectangular nested values with axis0 innermost\n");
+    sb.append("     * @return a typed ").append(dimension).append("D interpolator\n");
+    sb.append("     * @throws IllegalArgumentException if axes or values are invalid\n");
+    sb.append("     */\n");
     sb.append("    public static ").append(interfaceName(dimension)).append(" create(");
     for (int axis = 0; axis < dimension; axis++) {
       if (axis > 0) {
@@ -271,6 +418,16 @@ public final class InterpolatorSourceGenerator {
   }
 
   private void appendArrayFactory(StringBuilder sb, int dimension) {
+    sb.append("    /**\n");
+    sb.append("     * Creates a typed ")
+        .append(dimension)
+        .append("D interpolator from an axis array.\n");
+    sb.append("     *\n");
+    sb.append("     * @param axes coordinate axes in axis order\n");
+    sb.append("     * @param values flattened grid values in axis0-fastest order\n");
+    sb.append("     * @return a typed ").append(dimension).append("D interpolator\n");
+    sb.append("     * @throws IllegalArgumentException if axes or values are invalid\n");
+    sb.append("     */\n");
     sb.append("    public static ")
         .append(interfaceName(dimension))
         .append(" create")
@@ -295,6 +452,16 @@ public final class InterpolatorSourceGenerator {
   }
 
   private void appendArrayMultidimensionalFactory(StringBuilder sb, int dimension) {
+    sb.append("    /**\n");
+    sb.append("     * Creates a typed ")
+        .append(dimension)
+        .append("D interpolator from axes and nested values.\n");
+    sb.append("     *\n");
+    sb.append("     * @param axes coordinate axes in axis order\n");
+    sb.append("     * @param values rectangular nested values with axis0 innermost\n");
+    sb.append("     * @return a typed ").append(dimension).append("D interpolator\n");
+    sb.append("     * @throws IllegalArgumentException if axes or values are invalid\n");
+    sb.append("     */\n");
     sb.append("    public static ")
         .append(interfaceName(dimension))
         .append(" create")
@@ -311,6 +478,24 @@ public final class InterpolatorSourceGenerator {
   }
 
   private void appendFlattenHelper(StringBuilder sb, int dimension) {
+    sb.append("    /**\n");
+    if (dimension == 1) {
+      sb.append("     * Copies 1D values into a new flat array.\n");
+      sb.append("     *\n");
+      sb.append("     * @param values input values in axis0 order\n");
+      sb.append("     * @return a new flattened values array\n");
+      sb.append("     * @throws IllegalArgumentException if values is null\n");
+    } else {
+      sb.append("     * Flattens ")
+          .append(dimension)
+          .append("D values into axis0-fastest order.\n");
+      sb.append("     *\n");
+      sb.append("     * @param values rectangular values with axis0 innermost\n");
+      sb.append("     * @return a new flattened values array\n");
+      sb.append(
+          "     * @throws IllegalArgumentException if values is null, ragged, or too large\n");
+    }
+    sb.append("     */\n");
     sb.append("    public static double[] flatten")
         .append(dimension)
         .append("D(")
@@ -392,6 +577,14 @@ public final class InterpolatorSourceGenerator {
   }
 
   private void appendCheckedGridSize(StringBuilder sb) {
+    sb.append("    /**\n");
+    sb.append("     * Computes a checked product of grid sizes.\n");
+    sb.append("     *\n");
+    sb.append("     * @param sizes axis sizes to multiply\n");
+    sb.append("     * @return the product as an int\n");
+    sb.append(
+        "     * @throws IllegalArgumentException if a size is negative or the product is too large\n");
+    sb.append("     */\n");
     sb.append("    private static int checkedGridSize(int... sizes) {\n");
     sb.append("        long size = 1L;\n");
     sb.append("        for (int component : sizes) {\n");
@@ -408,13 +601,419 @@ public final class InterpolatorSourceGenerator {
     sb.append("    }\n");
   }
 
+  private String generateGeneratedTest() {
+    StringBuilder sb = new StringBuilder();
+    sb.append(packageLine());
+    sb.append("import static org.junit.Assert.assertArrayEquals;\n");
+    sb.append("import static org.junit.Assert.assertEquals;\n\n");
+    sb.append("import java.lang.reflect.Array;\n");
+    sb.append("import java.lang.reflect.Method;\n");
+    sb.append("import java.util.Arrays;\n");
+    sb.append("import org.junit.Test;\n\n");
+    sb.append("/**\n");
+    sb.append(" * Generated tests for generated interpolator sources.\n");
+    sb.append(" */\n");
+    sb.append("public final class InterpolatorsGeneratedTest {\n\n");
+    sb.append("    /** Tolerance used for floating-point interpolation assertions. */\n");
+    sb.append("    private static final double EPSILON = 1e-9;\n\n");
+
+    sb.append("    /**\n");
+    sb.append("     * Verifies every generated implementation against an independent reference.\n");
+    sb.append("     *\n");
+    sb.append("     * @throws Exception if generated reflection helpers fail\n");
+    sb.append("     */\n");
+    sb.append("    @Test\n");
+    sb.append("    public void interpolatorsMatchReferenceForAllMasks() throws Exception {\n");
+    sb.append("        for (int dimension = 1; dimension <= ")
+        .append(maxDimension)
+        .append("; dimension++) {\n");
+    sb.append("            int classCount = 1 << dimension;\n");
+    sb.append("            for (int mask = 0; mask < classCount; mask++) {\n");
+    sb.append("                double[][] axes = axesForMask(dimension, mask);\n");
+    sb.append("                double[] values = valuesForAxes(axes);\n");
+    sb.append("                Interpolator interpolator = Interpolators.create(axes, values);\n");
+    sb.append("                assertEquals(dimension, interpolator.dimensions());\n");
+    sb.append("                assertEquals(\n");
+    sb.append("                    implementationName(dimension, mask),\n");
+    sb.append("                    interpolator.getClass().getSimpleName());\n");
+    sb.append("                assertInterpolationMatchesReference(\n");
+    sb.append("                    interpolator, axes, values, firstCellMidpoint(axes));\n");
+    sb.append("                assertInterpolationMatchesReference(\n");
+    sb.append("                    interpolator, axes, values, exactMiddlePoint(axes));\n");
+    sb.append("                assertInterpolationMatchesReference(\n");
+    sb.append("                    interpolator, axes, values, clampedPoint(axes));\n");
+    sb.append("            }\n");
+    sb.append("        }\n");
+    sb.append("    }\n\n");
+
+    sb.append("    /**\n");
+    sb.append("     * Verifies representative generated flatten helpers.\n");
+    sb.append("     *\n");
+    sb.append("     * @throws Exception if reflection fails\n");
+    sb.append("     */\n");
+    sb.append("    @Test\n");
+    sb.append("    public void flattenHelpersUseAxisZeroFastestOrder() throws Exception {\n");
+    sb.append("        double[] oneD = {1.0, 2.0, 3.0};\n");
+    sb.append("        double[] flattenedOneD = Interpolators.flatten1D(oneD);\n");
+    sb.append("        assertArrayEquals(oneD, flattenedOneD, 0.0);\n");
+    sb.append("        oneD[0] = 99.0;\n");
+    sb.append("        assertEquals(1.0, flattenedOneD[0], 0.0);\n\n");
+    sb.append("        int[] sizes = new int[").append(maxDimension).append("];\n");
+    sb.append("        Arrays.fill(sizes, 2);\n");
+    sb.append("        double[] flat = new double[1 << ").append(maxDimension).append("];\n");
+    sb.append("        for (int i = 0; i < flat.length; i++) {\n");
+    sb.append("            flat[i] = i;\n");
+    sb.append("        }\n");
+    sb.append("        Method method = Interpolators.class.getMethod(\"flatten")
+        .append(maxDimension)
+        .append("D\", doubleArrayType(")
+        .append(maxDimension)
+        .append("));\n");
+    sb.append("        assertArrayEquals(\n");
+    sb.append("            flat,\n");
+    sb.append("            (double[]) method.invoke(null, toNestedValues(flat, sizes)),\n");
+    sb.append("            0.0);\n");
+    sb.append("    }\n\n");
+
+    appendGeneratedTestHelpers(sb);
+
+    sb.append("}\n");
+    return sb.toString();
+  }
+
+  private void appendGeneratedTestHelpers(StringBuilder sb) {
+    appendGeneratedTestAssertionHelpers(sb);
+    appendGeneratedTestGridHelpers(sb);
+    appendGeneratedTestPointHelpers(sb);
+    appendGeneratedTestReferenceHelpers(sb);
+    appendGeneratedTestNestedArrayHelpers(sb);
+    appendGeneratedTestNameHelpers(sb);
+  }
+
+  private void appendGeneratedTestAssertionHelpers(StringBuilder sb) {
+    sb.append("    /**\n");
+    sb.append(
+        "     * Compares one generated interpolation result with the reference implementation.\n");
+    sb.append("     *\n");
+    sb.append("     * @param interpolator generated interpolator under test\n");
+    sb.append("     * @param axes coordinate axes in axis order\n");
+    sb.append("     * @param values flat values in axis0-fastest order\n");
+    sb.append("     * @param point interpolation point in axis order\n");
+    sb.append("     */\n");
+    sb.append("    private static void assertInterpolationMatchesReference(\n");
+    sb.append(
+        "        Interpolator interpolator, double[][] axes, double[] values, double[] point) {\n");
+    sb.append("        assertEquals(\n");
+    sb.append("            referenceInterpolate(axes, values, point),\n");
+    sb.append("            interpolator.interpolate(point),\n");
+    sb.append("            EPSILON);\n");
+    sb.append("    }\n\n");
+  }
+
+  private void appendGeneratedTestGridHelpers(StringBuilder sb) {
+    sb.append("    /**\n");
+    sb.append("     * Builds axes whose uniformity matches the supplied implementation mask.\n");
+    sb.append("     *\n");
+    sb.append("     * @param dimension grid dimension\n");
+    sb.append("     * @param mask uniform-axis bit mask, with bit zero representing axis0\n");
+    sb.append("     * @return coordinate axes in axis order\n");
+    sb.append("     */\n");
+    sb.append("    private static double[][] axesForMask(int dimension, int mask) {\n");
+    sb.append("        double[][] axes = new double[dimension][];\n");
+    sb.append("        for (int axis = 0; axis < dimension; axis++) {\n");
+    sb.append("            if ((mask & (1 << axis)) != 0) {\n");
+    sb.append(
+        "                axes[axis] = new double[] {-1.0 - axis, 0.5 + axis, 2.0 + 3.0 * axis};\n");
+    sb.append("            } else {\n");
+    sb.append(
+        "                axes[axis] = new double[] {-2.0 - axis, -0.5 + axis, 3.25 + 2.0 * axis};\n");
+    sb.append("            }\n");
+    sb.append("        }\n");
+    sb.append("        return axes;\n");
+    sb.append("    }\n\n");
+    sb.append("    /**\n");
+    sb.append("     * Creates deterministic sample values for the supplied axes.\n");
+    sb.append("     *\n");
+    sb.append("     * @param axes coordinate axes in axis order\n");
+    sb.append("     * @return flat values in axis0-fastest order\n");
+    sb.append("     */\n");
+    sb.append("    private static double[] valuesForAxes(double[][] axes) {\n");
+    sb.append("        int[] sizes = axisSizes(axes);\n");
+    sb.append("        int total = 1;\n");
+    sb.append("        for (int size : sizes) {\n");
+    sb.append("            total *= size;\n");
+    sb.append("        }\n");
+    sb.append("        double[] values = new double[total];\n");
+    sb.append("        int[] indices = new int[axes.length];\n");
+    sb.append("        for (int linear = 0; linear < total; linear++) {\n");
+    sb.append("            values[linear] = sampleValue(axes, indices);\n");
+    sb.append("            increment(indices, sizes);\n");
+    sb.append("        }\n");
+    sb.append("        return values;\n");
+    sb.append("    }\n\n");
+    sb.append("    /**\n");
+    sb.append("     * Evaluates a smooth sample function at one grid index.\n");
+    sb.append("     *\n");
+    sb.append("     * @param axes coordinate axes in axis order\n");
+    sb.append("     * @param indices grid indices in axis order\n");
+    sb.append("     * @return sampled value\n");
+    sb.append("     */\n");
+    sb.append("    private static double sampleValue(double[][] axes, int[] indices) {\n");
+    sb.append("        double value = 7.0;\n");
+    sb.append("        for (int axis = 0; axis < axes.length; axis++) {\n");
+    sb.append("            double coordinate = axes[axis][indices[axis]];\n");
+    sb.append("            value += (axis + 1.25) * coordinate;\n");
+    sb.append("            value += 0.1 * (axis + 1) * coordinate * coordinate;\n");
+    sb.append("        }\n");
+    sb.append("        return value;\n");
+    sb.append("    }\n\n");
+    sb.append("    /**\n");
+    sb.append("     * Advances axis0-fastest grid indices by one position.\n");
+    sb.append("     *\n");
+    sb.append("     * @param indices mutable grid indices in axis order\n");
+    sb.append("     * @param sizes axis sizes in axis order\n");
+    sb.append("     */\n");
+    sb.append("    private static void increment(int[] indices, int[] sizes) {\n");
+    sb.append("        for (int axis = 0; axis < indices.length; axis++) {\n");
+    sb.append("            indices[axis]++;\n");
+    sb.append("            if (indices[axis] < sizes[axis]) {\n");
+    sb.append("                return;\n");
+    sb.append("            }\n");
+    sb.append("            indices[axis] = 0;\n");
+    sb.append("        }\n");
+    sb.append("    }\n\n");
+  }
+
+  private void appendGeneratedTestPointHelpers(StringBuilder sb) {
+    sb.append("    /**\n");
+    sb.append("     * Selects a point inside the first grid cell.\n");
+    sb.append("     *\n");
+    sb.append("     * @param axes coordinate axes in axis order\n");
+    sb.append("     * @return midpoint coordinates in axis order\n");
+    sb.append("     */\n");
+    sb.append("    private static double[] firstCellMidpoint(double[][] axes) {\n");
+    sb.append("        double[] point = new double[axes.length];\n");
+    sb.append("        for (int axis = 0; axis < axes.length; axis++) {\n");
+    sb.append("            point[axis] = 0.5 * (axes[axis][0] + axes[axis][1]);\n");
+    sb.append("        }\n");
+    sb.append("        return point;\n");
+    sb.append("    }\n\n");
+    sb.append("    /**\n");
+    sb.append("     * Selects a point exactly on the middle grid coordinate of each axis.\n");
+    sb.append("     *\n");
+    sb.append("     * @param axes coordinate axes in axis order\n");
+    sb.append("     * @return exact grid coordinates in axis order\n");
+    sb.append("     */\n");
+    sb.append("    private static double[] exactMiddlePoint(double[][] axes) {\n");
+    sb.append("        double[] point = new double[axes.length];\n");
+    sb.append("        for (int axis = 0; axis < axes.length; axis++) {\n");
+    sb.append("            point[axis] = axes[axis][1];\n");
+    sb.append("        }\n");
+    sb.append("        return point;\n");
+    sb.append("    }\n\n");
+    sb.append("    /**\n");
+    sb.append("     * Selects alternating below-minimum and above-maximum coordinates.\n");
+    sb.append("     *\n");
+    sb.append("     * @param axes coordinate axes in axis order\n");
+    sb.append("     * @return out-of-bounds coordinates in axis order\n");
+    sb.append("     */\n");
+    sb.append("    private static double[] clampedPoint(double[][] axes) {\n");
+    sb.append("        double[] point = new double[axes.length];\n");
+    sb.append("        for (int axis = 0; axis < axes.length; axis++) {\n");
+    sb.append("            point[axis] = axis % 2 == 0\n");
+    sb.append("                ? axes[axis][0] - 100.0\n");
+    sb.append("                : axes[axis][axes[axis].length - 1] + 100.0;\n");
+    sb.append("        }\n");
+    sb.append("        return point;\n");
+    sb.append("    }\n\n");
+  }
+
+  private void appendGeneratedTestReferenceHelpers(StringBuilder sb) {
+    sb.append("    /**\n");
+    sb.append("     * Independently computes clamped multilinear interpolation.\n");
+    sb.append("     *\n");
+    sb.append("     * @param axes coordinate axes in axis order\n");
+    sb.append("     * @param values flat values in axis0-fastest order\n");
+    sb.append("     * @param point interpolation point in axis order\n");
+    sb.append("     * @return reference interpolation result\n");
+    sb.append("     */\n");
+    sb.append(
+        "    private static double referenceInterpolate(double[][] axes, double[] values, double[] point) {\n");
+    sb.append("        int dimension = axes.length;\n");
+    sb.append("        int[] lower = new int[dimension];\n");
+    sb.append("        double[] t = new double[dimension];\n");
+    sb.append("        int[] strides = strides(axisSizes(axes));\n");
+    sb.append("        for (int axis = 0; axis < dimension; axis++) {\n");
+    sb.append("            double[] axisValues = axes[axis];\n");
+    sb.append("            if (point[axis] <= axisValues[0]) {\n");
+    sb.append("                lower[axis] = 0;\n");
+    sb.append("                t[axis] = 0.0;\n");
+    sb.append("            } else if (point[axis] >= axisValues[axisValues.length - 1]) {\n");
+    sb.append("                lower[axis] = axisValues.length - 2;\n");
+    sb.append("                t[axis] = 1.0;\n");
+    sb.append("            } else {\n");
+    sb.append("                lower[axis] = lowerIndex(axisValues, point[axis]);\n");
+    sb.append("                t[axis] = (point[axis] - axisValues[lower[axis]])\n");
+    sb.append("                    / (axisValues[lower[axis] + 1] - axisValues[lower[axis]]);\n");
+    sb.append("            }\n");
+    sb.append("        }\n");
+    sb.append("        double result = 0.0;\n");
+    sb.append("        int corners = 1 << dimension;\n");
+    sb.append("        for (int mask = 0; mask < corners; mask++) {\n");
+    sb.append("            double weight = 1.0;\n");
+    sb.append("            int linear = 0;\n");
+    sb.append("            for (int axis = 0; axis < dimension; axis++) {\n");
+    sb.append("                boolean upper = (mask & (1 << axis)) != 0;\n");
+    sb.append("                weight *= upper ? t[axis] : 1.0 - t[axis];\n");
+    sb.append("                linear += (lower[axis] + (upper ? 1 : 0)) * strides[axis];\n");
+    sb.append("            }\n");
+    sb.append("            result += weight * values[linear];\n");
+    sb.append("        }\n");
+    sb.append("        return result;\n");
+    sb.append("    }\n\n");
+    sb.append("    /**\n");
+    sb.append("     * Finds the lower bracketing index for a sorted axis.\n");
+    sb.append("     *\n");
+    sb.append("     * @param axis sorted coordinate axis\n");
+    sb.append("     * @param value coordinate value inside the axis bounds\n");
+    sb.append("     * @return lower bracketing index\n");
+    sb.append("     */\n");
+    sb.append("    private static int lowerIndex(double[] axis, double value) {\n");
+    sb.append("        int low = 0;\n");
+    sb.append("        int high = axis.length - 1;\n");
+    sb.append("        while (high - low > 1) {\n");
+    sb.append("            int mid = (low + high) >>> 1;\n");
+    sb.append("            if (axis[mid] <= value) {\n");
+    sb.append("                low = mid;\n");
+    sb.append("            } else {\n");
+    sb.append("                high = mid;\n");
+    sb.append("            }\n");
+    sb.append("        }\n");
+    sb.append("        return low;\n");
+    sb.append("    }\n\n");
+    sb.append("    /**\n");
+    sb.append("     * Reads axis sizes from an axis array.\n");
+    sb.append("     *\n");
+    sb.append("     * @param axes coordinate axes in axis order\n");
+    sb.append("     * @return axis sizes in axis order\n");
+    sb.append("     */\n");
+    sb.append("    private static int[] axisSizes(double[][] axes) {\n");
+    sb.append("        int[] sizes = new int[axes.length];\n");
+    sb.append("        for (int axis = 0; axis < axes.length; axis++) {\n");
+    sb.append("            sizes[axis] = axes[axis].length;\n");
+    sb.append("        }\n");
+    sb.append("        return sizes;\n");
+    sb.append("    }\n\n");
+    sb.append("    /**\n");
+    sb.append("     * Computes axis0-fastest flat-array strides.\n");
+    sb.append("     *\n");
+    sb.append("     * @param sizes axis sizes in axis order\n");
+    sb.append("     * @return flat-array strides in axis order\n");
+    sb.append("     */\n");
+    sb.append("    private static int[] strides(int[] sizes) {\n");
+    sb.append("        int[] strides = new int[sizes.length];\n");
+    sb.append("        strides[0] = 1;\n");
+    sb.append("        for (int axis = 1; axis < sizes.length; axis++) {\n");
+    sb.append("            strides[axis] = strides[axis - 1] * sizes[axis - 1];\n");
+    sb.append("        }\n");
+    sb.append("        return strides;\n");
+    sb.append("    }\n\n");
+  }
+
+  private void appendGeneratedTestNestedArrayHelpers(StringBuilder sb) {
+    sb.append("    /**\n");
+    sb.append("     * Converts flat values into a natural nested Java array.\n");
+    sb.append("     *\n");
+    sb.append("     * @param flatValues flat values in axis0-fastest order\n");
+    sb.append("     * @param axisSizes axis sizes in axis order\n");
+    sb.append("     * @return nested primitive double array\n");
+    sb.append("     */\n");
+    sb.append("    private static Object toNestedValues(double[] flatValues, int[] axisSizes) {\n");
+    sb.append("        int dimension = axisSizes.length;\n");
+    sb.append("        int[] javaSizes = new int[dimension];\n");
+    sb.append("        for (int i = 0; i < dimension; i++) {\n");
+    sb.append("            javaSizes[i] = axisSizes[dimension - 1 - i];\n");
+    sb.append("        }\n");
+    sb.append("        Object nested = Array.newInstance(double.class, javaSizes);\n");
+    sb.append("        int[] offset = {0};\n");
+    sb.append("        fillNestedValues(nested, 0, javaSizes.length, flatValues, offset);\n");
+    sb.append("        return nested;\n");
+    sb.append("    }\n\n");
+    sb.append("    /**\n");
+    sb.append("     * Recursively fills a nested primitive double array.\n");
+    sb.append("     *\n");
+    sb.append("     * @param array nested array at the current depth\n");
+    sb.append("     * @param depth current nesting depth\n");
+    sb.append("     * @param dimensions total nesting depth\n");
+    sb.append("     * @param flatValues flat source values\n");
+    sb.append("     * @param offset mutable flat source offset\n");
+    sb.append("     */\n");
+    sb.append("    private static void fillNestedValues(\n");
+    sb.append(
+        "        Object array, int depth, int dimensions, double[] flatValues, int[] offset) {\n");
+    sb.append("        int length = Array.getLength(array);\n");
+    sb.append("        if (depth == dimensions - 1) {\n");
+    sb.append("            for (int i = 0; i < length; i++) {\n");
+    sb.append("                Array.setDouble(array, i, flatValues[offset[0]++]);\n");
+    sb.append("            }\n");
+    sb.append("            return;\n");
+    sb.append("        }\n");
+    sb.append("        for (int i = 0; i < length; i++) {\n");
+    sb.append(
+        "            fillNestedValues(Array.get(array, i), depth + 1, dimensions, flatValues, offset);\n");
+    sb.append("        }\n");
+    sb.append("    }\n\n");
+    sb.append("    /**\n");
+    sb.append("     * Creates the reflective type for a primitive double array dimension.\n");
+    sb.append("     *\n");
+    sb.append("     * @param dimension array dimension\n");
+    sb.append("     * @return primitive double array class\n");
+    sb.append("     */\n");
+    sb.append("    private static Class<?> doubleArrayType(int dimension) {\n");
+    sb.append("        return Array.newInstance(double.class, new int[dimension]).getClass();\n");
+    sb.append("    }\n\n");
+  }
+
+  private void appendGeneratedTestNameHelpers(StringBuilder sb) {
+    sb.append("    /**\n");
+    sb.append("     * Builds the generated implementation class name for a dimension and mask.\n");
+    sb.append("     *\n");
+    sb.append("     * @param dimension grid dimension\n");
+    sb.append("     * @param mask uniform-axis bit mask\n");
+    sb.append("     * @return expected implementation simple class name\n");
+    sb.append("     */\n");
+    sb.append("    private static String implementationName(int dimension, int mask) {\n");
+    sb.append(
+        "        StringBuilder sb = new StringBuilder(\"Interpolator\").append(dimension).append(\"D_\");\n");
+    sb.append("        for (int axis = 0; axis < dimension; axis++) {\n");
+    sb.append("            sb.append((mask & (1 << axis)) == 0 ? 'N' : 'U');\n");
+    sb.append("        }\n");
+    sb.append("        return sb.toString();\n");
+    sb.append("    }\n");
+  }
+
   private String generateSupport() {
     StringBuilder sb = new StringBuilder();
     sb.append(packageLine());
     sb.append("import java.util.Arrays;\n\n");
+    sb.append("/**\n");
+    sb.append(" * Shared preparation helpers used by generated interpolators.\n");
+    sb.append(" */\n");
     sb.append("final class InterpolationSupport {\n\n");
+    sb.append("    /**\n");
+    sb.append("     * Prevents instantiation of this utility class.\n");
+    sb.append("     */\n");
     sb.append("    private InterpolationSupport() {}\n\n");
 
+    sb.append("    /**\n");
+    sb.append("     * Validates, sorts, and prepares an interpolation grid.\n");
+    sb.append("     *\n");
+    sb.append("     * @param dimensions expected number of axes\n");
+    sb.append("     * @param inputAxes input coordinate axes\n");
+    sb.append("     * @param inputValues flattened grid values\n");
+    sb.append("     * @return the prepared grid\n");
+    sb.append("     * @throws IllegalArgumentException if axes or values are invalid\n");
+    sb.append("     */\n");
     sb.append(
         "    static PreparedGrid prepare(int dimensions, double[][] inputAxes, double[] inputValues) {\n");
     sb.append("        if (inputAxes == null) {\n");
@@ -458,6 +1057,13 @@ public final class InterpolatorSourceGenerator {
     sb.append("        return new PreparedGrid(axes, values, uniformMask);\n");
     sb.append("    }\n\n");
 
+    sb.append("    /**\n");
+    sb.append("     * Locates the lower interpolation index for a sorted axis.\n");
+    sb.append("     *\n");
+    sb.append("     * @param axis sorted coordinate axis\n");
+    sb.append("     * @param value coordinate value inside the axis bounds\n");
+    sb.append("     * @return the lower bracketing index\n");
+    sb.append("     */\n");
     sb.append("    static int lowerIndex(double[] axis, double value) {\n");
     sb.append("        int low = 0;\n");
     sb.append("        int high = axis.length - 1;\n\n");
@@ -472,6 +1078,15 @@ public final class InterpolatorSourceGenerator {
     sb.append("        return low;\n");
     sb.append("    }\n\n");
 
+    sb.append("    /**\n");
+    sb.append("     * Sorts and validates one axis.\n");
+    sb.append("     *\n");
+    sb.append("     * @param axis input axis values\n");
+    sb.append("     * @param axisNumber zero-based axis number for diagnostics\n");
+    sb.append("     * @return the sorted axis with original index mapping\n");
+    sb.append(
+        "     * @throws IllegalArgumentException if the axis is null, too short, non-finite, or duplicate\n");
+    sb.append("     */\n");
     sb.append("    private static SortedAxis sortAxis(double[] axis, int axisNumber) {\n");
     sb.append("        if (axis == null) {\n");
     sb.append(
@@ -516,6 +1131,14 @@ public final class InterpolatorSourceGenerator {
     sb.append("        return new SortedAxis(sorted, originalIndices);\n");
     sb.append("    }\n\n");
 
+    sb.append("    /**\n");
+    sb.append("     * Reorders flattened values to match sorted axes.\n");
+    sb.append("     *\n");
+    sb.append("     * @param inputValues caller-supplied flattened values\n");
+    sb.append("     * @param sizes axis sizes after sorting\n");
+    sb.append("     * @param axes sorted axes with original index mappings\n");
+    sb.append("     * @return reordered flattened values\n");
+    sb.append("     */\n");
     sb.append(
         "    private static double[] reorderValues(double[] inputValues, int[] sizes, SortedAxis[] axes) {\n");
     sb.append("        int dimensions = sizes.length;\n");
@@ -537,6 +1160,12 @@ public final class InterpolatorSourceGenerator {
     sb.append("        return reordered;\n");
     sb.append("    }\n\n");
 
+    sb.append("    /**\n");
+    sb.append("     * Determines whether an axis is uniformly spaced.\n");
+    sb.append("     *\n");
+    sb.append("     * @param axis sorted coordinate axis\n");
+    sb.append("     * @return true when every step is equal within tolerance\n");
+    sb.append("     */\n");
     sb.append("    private static boolean isUniform(double[] axis) {\n");
     sb.append("        double step = axis[1] - axis[0];\n");
     sb.append("        double tolerance = Math.max(Math.abs(step) * 1e-12, 1e-15);\n\n");
@@ -549,10 +1178,23 @@ public final class InterpolatorSourceGenerator {
     sb.append("        return true;\n");
     sb.append("    }\n\n");
 
+    sb.append("    /**\n");
+    sb.append("     * Prepared grid data consumed by generated implementations.\n");
+    sb.append("     */\n");
     sb.append("    static final class PreparedGrid {\n");
+    sb.append("        /** Sorted axes in axis order. */\n");
     sb.append("        final double[][] axes;\n");
+    sb.append("        /** Flattened values aligned to the sorted axes. */\n");
     sb.append("        final double[] values;\n");
+    sb.append("        /** Bit mask indicating which axes are uniformly spaced. */\n");
     sb.append("        final int uniformMask;\n\n");
+    sb.append("        /**\n");
+    sb.append("         * Creates prepared grid data.\n");
+    sb.append("         *\n");
+    sb.append("         * @param axes sorted axes in axis order\n");
+    sb.append("         * @param values flattened values aligned to sorted axes\n");
+    sb.append("         * @param uniformMask bit mask for uniformly spaced axes\n");
+    sb.append("         */\n");
     sb.append("        PreparedGrid(double[][] axes, double[] values, int uniformMask) {\n");
     sb.append("            this.axes = axes;\n");
     sb.append("            this.values = values;\n");
@@ -560,16 +1202,39 @@ public final class InterpolatorSourceGenerator {
     sb.append("        }\n");
     sb.append("    }\n\n");
 
+    sb.append("    /**\n");
+    sb.append("     * Sorted axis values plus optional original-index mapping.\n");
+    sb.append("     */\n");
     sb.append("    private static final class SortedAxis {\n");
+    sb.append("        /** Sorted axis values. */\n");
     sb.append("        final double[] values;\n");
+    sb.append(
+        "        /** Original index for each sorted index, or null if the axis was already sorted. */\n");
     sb.append("        final int[] originalIndices;\n\n");
+    sb.append("        /**\n");
+    sb.append("         * Creates sorted axis metadata.\n");
+    sb.append("         *\n");
+    sb.append("         * @param values sorted axis values\n");
+    sb.append("         * @param originalIndices original index mapping, or null when unchanged\n");
+    sb.append("         */\n");
     sb.append("        SortedAxis(double[] values, int[] originalIndices) {\n");
     sb.append("            this.values = values;\n");
     sb.append("            this.originalIndices = originalIndices;\n");
     sb.append("        }\n\n");
+    sb.append("        /**\n");
+    sb.append("         * Reports whether sorting changed the axis order.\n");
+    sb.append("         *\n");
+    sb.append("         * @return true if values were reordered\n");
+    sb.append("         */\n");
     sb.append("        boolean wasReordered() {\n");
     sb.append("            return originalIndices != null;\n");
     sb.append("        }\n\n");
+    sb.append("        /**\n");
+    sb.append("         * Returns the original index for a sorted index.\n");
+    sb.append("         *\n");
+    sb.append("         * @param sortedIndex index in sorted order\n");
+    sb.append("         * @return index in the original caller order\n");
+    sb.append("         */\n");
     sb.append("        int originalIndex(int sortedIndex) {\n");
     sb.append(
         "            return originalIndices == null ? sortedIndex : originalIndices[sortedIndex];\n");
@@ -586,18 +1251,28 @@ public final class InterpolatorSourceGenerator {
     String className = implementationName(dimension, uniformMask);
     String interfaceName = interfaceName(dimension);
 
+    sb.append("/**\n");
+    sb.append(" * Generated ")
+        .append(dimension)
+        .append("D interpolator for ")
+        .append(patternName(dimension, uniformMask))
+        .append(" axes.\n");
+    sb.append(" */\n");
     sb.append("final class ")
         .append(className)
         .append(" implements ")
         .append(interfaceName)
         .append(" {\n\n");
 
+    sb.append("    /** Flattened grid values in sorted axis order. */\n");
     sb.append("    private final double[] values;\n\n");
     for (int axis = 0; axis < dimension; axis++) {
+      sb.append("    /** Number of points on axis ").append(axis).append(". */\n");
       sb.append("    private final int n").append(axis).append(";\n");
     }
     sb.append("\n");
     for (int axis = 1; axis < dimension; axis++) {
+      sb.append("    /** Linear stride for axis ").append(axis).append(". */\n");
       sb.append("    private final int stride").append(axis).append(";\n");
     }
     if (dimension > 1) {
@@ -606,15 +1281,28 @@ public final class InterpolatorSourceGenerator {
 
     for (int axis = 0; axis < dimension; axis++) {
       if (isUniform(uniformMask, axis)) {
+        sb.append("    /** First coordinate on uniform axis ").append(axis).append(". */\n");
         sb.append("    private final double axis").append(axis).append("First;\n");
+        sb.append("    /** Reciprocal step size for uniform axis ").append(axis).append(". */\n");
         sb.append("    private final double axis").append(axis).append("InvStep;\n\n");
       } else {
+        sb.append("    /** Sorted coordinate values for non-uniform axis ")
+            .append(axis)
+            .append(". */\n");
         sb.append("    private final double[] axis").append(axis).append(";\n");
+        sb.append("    /** First coordinate on non-uniform axis ").append(axis).append(". */\n");
         sb.append("    private final double axis").append(axis).append("First;\n");
+        sb.append("    /** Last coordinate on non-uniform axis ").append(axis).append(". */\n");
         sb.append("    private final double axis").append(axis).append("Last;\n\n");
       }
     }
 
+    sb.append("    /**\n");
+    sb.append("     * Creates a generated interpolator from prepared axes and values.\n");
+    sb.append("     *\n");
+    sb.append("     * @param axes sorted axes in axis order\n");
+    sb.append("     * @param values flattened values aligned to the sorted axes\n");
+    sb.append("     */\n");
     sb.append("    ").append(className).append("(double[][] axes, double[] values) {\n");
     sb.append("        this.values = values;\n\n");
     for (int axis = 0; axis < dimension; axis++) {
@@ -674,6 +1362,7 @@ public final class InterpolatorSourceGenerator {
     }
     sb.append("    }\n\n");
 
+    appendTypedInterpolateJavadocs(sb, "    ", dimension);
     sb.append("    @Override\n");
     sb.append("    public ").append(typedMethodSignature(dimension)).append(" {\n");
 
@@ -841,6 +1530,25 @@ public final class InterpolatorSourceGenerator {
     }
     sb.append(")");
     return sb.toString();
+  }
+
+  private void appendTypedInterpolateJavadocs(StringBuilder sb, String indent, int dimension) {
+    sb.append(indent).append("/**\n");
+    sb.append(indent)
+        .append(" * Interpolates a value at the supplied ")
+        .append(dimension)
+        .append("D coordinate.\n");
+    sb.append(indent).append(" *\n");
+    for (int axis = 0; axis < dimension; axis++) {
+      sb.append(indent)
+          .append(" * @param ")
+          .append(COORD_NAMES[axis])
+          .append(" coordinate for axis ")
+          .append(axis)
+          .append("\n");
+    }
+    sb.append(indent).append(" * @return the interpolated value, clamped to the grid bounds\n");
+    sb.append(indent).append(" */\n");
   }
 
   private String multidimensionalValuesType(int dimension) {

@@ -54,6 +54,7 @@ spotbugs {
 	effort = com.github.spotbugs.snom.Effort.MAX
 	reportLevel = com.github.spotbugs.snom.Confidence.valueOf('LOW')
 	ignoreFailures = false
+	excludeFilter = rootProject.file('config/spotbugs/exclude.xml')
 }
 
 def generatedJavaSpotbugsSourcesDir = layout.buildDirectory.dir('generated/spotbugs/java-sources')

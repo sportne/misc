@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FindBugsFilter>
+  <!-- Test harnesses load generated classes from temporary compilation directories. -->
+  <Match>
+    <Class name="io.github.sportne.misc.InterpolatorSourceGeneratorTest"/>
+    <Bug pattern="DP_CREATE_CLASSLOADER_INSIDE_DO_PRIVILEGED"/>
+  </Match>
+  <Match>
+    <Class name="io.github.sportne.misc.InterpolatorSourceGeneratorTest$GeneratedProject"/>
+    <Bug pattern="DP_CREATE_CLASSLOADER_INSIDE_DO_PRIVILEGED"/>
+  </Match>
+</FindBugsFilter>
