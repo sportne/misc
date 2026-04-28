@@ -74,7 +74,8 @@ tasks.register('generateJavaSourcesForSpotbugs', JavaExec) {
 	args(
 			generatedJavaSpotbugsSourcesDir.get().asFile.absolutePath,
 			'generated.interpolation',
-			'5'
+			'5',
+			'--vectors'
 			)
 	outputs.dir(generatedJavaSpotbugsSourcesDir)
 }

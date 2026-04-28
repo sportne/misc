@@ -21,7 +21,8 @@ import java.util.List;
  * com.example.interpolation 4
  *
  * <p>Arguments: 0: output source root, for example src/main/java. Default: generated-src 1: package
- * name. Default: generated.interpolation 2: max dimension. Default: 4
+ * name. Default: generated.interpolation 2: max dimension. Default: 4 Optional flags: --tests
+ * test-source-root, --vectors.
  */
 public final class InterpolatorSourceGenerator {
 
@@ -31,6 +32,7 @@ public final class InterpolatorSourceGenerator {
   private final int maxDimension;
   private final Path packageDirectory;
   private final Path testPackageDirectory;
+  private final boolean generateVectors;
 
   public static void main(String[] args) throws IOException {
     GenerationOptions options = GenerationOptions.parse(args);
@@ -44,17 +46,26 @@ public final class InterpolatorSourceGenerator {
 
     InterpolatorSourceGenerator generator =
         new InterpolatorSourceGenerator(
-            options.sourceRoot, options.packageName, options.maxDimension, options.testSourceRoot);
+            options.sourceRoot,
+            options.packageName,
+            options.maxDimension,
+            options.testSourceRoot,
+            options.generateVectors);
     generator.generateAll();
   }
 
   private InterpolatorSourceGenerator(
-      Path sourceRoot, String packageName, int maxDimension, Path testSourceRoot) {
+      Path sourceRoot,
+      String packageName,
+      int maxDimension,
+      Path testSourceRoot,
+      boolean generateVectors) {
     this.packageName = packageName;
     this.maxDimension = maxDimension;
     this.packageDirectory = sourceRoot.resolve(packageName.replace('.', '/'));
     this.testPackageDirectory =
         testSourceRoot == null ? null : testSourceRoot.resolve(packageName.replace('.', '/'));
+    this.generateVectors = generateVectors;
   }
 
   private void generateAll() throws IOException {
@@ -64,16 +75,26 @@ public final class InterpolatorSourceGenerator {
     }
 
     writeSource("Interpolator", generateBaseInterpolator());
+    if (generateVectors) {
+      writeSource("VectorInterpolator", generateBaseVectorInterpolator());
+    }
     writeSource("InterpolationSupport", generateSupport());
     writeSource("Interpolators", generateFactory());
 
     for (int dimension = 1; dimension <= maxDimension; dimension++) {
       writeSource(interfaceName(dimension), generateDimensionInterface(dimension));
+      if (generateVectors) {
+        writeSource(vectorInterfaceName(dimension), generateVectorDimensionInterface(dimension));
+      }
 
       int classCount = 1 << dimension;
       for (int mask = 0; mask < classCount; mask++) {
         String className = implementationName(dimension, mask);
         writeSource(className, generateImplementation(dimension, mask));
+        if (generateVectors) {
+          String vectorClassName = vectorImplementationName(dimension, mask);
+          writeSource(vectorClassName, generateVectorImplementation(dimension, mask));
+        }
       }
     }
 
@@ -103,13 +124,19 @@ public final class InterpolatorSourceGenerator {
     final String packageName;
     final int maxDimension;
     final Path testSourceRoot;
+    final boolean generateVectors;
 
     private GenerationOptions(
-        Path sourceRoot, String packageName, int maxDimension, Path testSourceRoot) {
+        Path sourceRoot,
+        String packageName,
+        int maxDimension,
+        Path testSourceRoot,
+        boolean generateVectors) {
       this.sourceRoot = sourceRoot;
       this.packageName = packageName;
       this.maxDimension = maxDimension;
       this.testSourceRoot = testSourceRoot;
+      this.generateVectors = generateVectors;
     }
 
     static GenerationOptions parse(String[] args) {
@@ -117,6 +144,7 @@ public final class InterpolatorSourceGenerator {
       String packageName = args.length >= 2 ? args[1] : "generated.interpolation";
       int maxDimension = args.length >= 3 ? Integer.parseInt(args[2]) : 4;
       Path testSourceRoot = null;
+      boolean generateVectors = false;
 
       int index = Math.min(args.length, 3);
       while (index < args.length) {
@@ -130,12 +158,19 @@ public final class InterpolatorSourceGenerator {
           }
           testSourceRoot = Paths.get(args[index + 1]);
           index += 2;
+        } else if ("--vectors".equals(option)) {
+          if (generateVectors) {
+            throw new IllegalArgumentException("--vectors may only be specified once");
+          }
+          generateVectors = true;
+          index++;
         } else {
           throw new IllegalArgumentException("Unknown option: " + option);
         }
       }
 
-      return new GenerationOptions(sourceRoot, packageName, maxDimension, testSourceRoot);
+      return new GenerationOptions(
+          sourceRoot, packageName, maxDimension, testSourceRoot, generateVectors);
     }
   }
 
@@ -163,6 +198,49 @@ public final class InterpolatorSourceGenerator {
     sb.append("     * @throws IllegalArgumentException if the coordinate count is invalid\n");
     sb.append("     */\n");
     sb.append("    double interpolate(double... coordinates);\n");
+    sb.append("}\n");
+    return sb.toString();
+  }
+
+  private String generateBaseVectorInterpolator() {
+    StringBuilder sb = new StringBuilder();
+    sb.append(packageLine());
+    sb.append("/**\n");
+    sb.append(" * Generic view over a generated vector-valued interpolator.\n");
+    sb.append(" *\n");
+    sb.append(" * Values are organized as values[outputIndex][flatGridIndex].\n");
+    sb.append(" */\n");
+    sb.append("public interface VectorInterpolator {\n");
+    sb.append("    /**\n");
+    sb.append("     * Returns the number of coordinate axes accepted by this interpolator.\n");
+    sb.append("     *\n");
+    sb.append("     * @return the dimensionality of this interpolator\n");
+    sb.append("     */\n");
+    sb.append("    int dimensions();\n\n");
+    sb.append("    /**\n");
+    sb.append(
+        "     * Returns the number of output values computed for each interpolation point.\n");
+    sb.append("     *\n");
+    sb.append("     * @return the output value count\n");
+    sb.append("     */\n");
+    sb.append("    int outputs();\n\n");
+    sb.append("    /**\n");
+    sb.append("     * Interpolates all output values at the supplied coordinates.\n");
+    sb.append("     *\n");
+    sb.append("     * @param coordinates coordinates in axis order\n");
+    sb.append("     * @return a new array containing interpolated output values\n");
+    sb.append("     * @throws IllegalArgumentException if the coordinate count is invalid\n");
+    sb.append("     */\n");
+    sb.append("    double[] interpolate(double... coordinates);\n\n");
+    sb.append("    /**\n");
+    sb.append("     * Interpolates all output values into a caller-supplied array.\n");
+    sb.append("     *\n");
+    sb.append("     * @param coordinates coordinates in axis order\n");
+    sb.append("     * @param out destination array with length equal to outputs()\n");
+    sb.append(
+        "     * @throws IllegalArgumentException if coordinates or out are null or have invalid lengths\n");
+    sb.append("     */\n");
+    sb.append("    void interpolate(double[] coordinates, double[] out);\n");
     sb.append("}\n");
     return sb.toString();
   }
@@ -223,6 +301,101 @@ public final class InterpolatorSourceGenerator {
 
     sb.append("}\n");
     return sb.toString();
+  }
+
+  private String generateVectorDimensionInterface(int dimension) {
+    StringBuilder sb = new StringBuilder();
+    sb.append(packageLine());
+    sb.append("/**\n");
+    sb.append(" * Typed ").append(dimension).append("D vector-valued interpolator interface.\n");
+    sb.append(" */\n");
+    sb.append("public interface ")
+        .append(vectorInterfaceName(dimension))
+        .append(" extends VectorInterpolator {\n");
+    appendVectorTypedInterpolateJavadocs(sb, "    ", dimension, false);
+    sb.append("    ").append(vectorTypedAllocatingMethodSignature(dimension)).append(" {\n");
+    sb.append("        double[] out = new double[outputs()];\n");
+    sb.append("        interpolate(\n");
+    for (int axis = 0; axis < dimension; axis++) {
+      sb.append("            ").append(COORD_NAMES[axis]).append(",\n");
+    }
+    sb.append("            out\n");
+    sb.append("        );\n");
+    sb.append("        return out;\n");
+    sb.append("    }\n\n");
+
+    appendVectorTypedInterpolateJavadocs(sb, "    ", dimension, true);
+    sb.append("    ").append(vectorTypedOutputMethodSignature(dimension)).append(";\n\n");
+
+    sb.append("    /**\n");
+    sb.append("     * Returns this interface dimensionality.\n");
+    sb.append("     *\n");
+    sb.append("     * @return ").append(dimension).append("\n");
+    sb.append("     */\n");
+    sb.append("    @Override\n");
+    sb.append("    default int dimensions() {\n");
+    sb.append("        return ").append(dimension).append(";\n");
+    sb.append("    }\n\n");
+
+    sb.append("    /**\n");
+    sb.append("     * Interpolates using a varargs coordinate array.\n");
+    sb.append("     *\n");
+    sb.append("     * @param coordinates exactly ")
+        .append(dimension)
+        .append(" coordinate values\n");
+    sb.append("     * @return a new array containing interpolated output values\n");
+    sb.append(
+        "     * @throws IllegalArgumentException if coordinates is null or has the wrong length\n");
+    sb.append("     */\n");
+    sb.append("    @Override\n");
+    sb.append("    default double[] interpolate(double... coordinates) {\n");
+    appendVectorCoordinateValidation(sb, dimension, 2);
+    sb.append("        return interpolate(\n");
+    for (int axis = 0; axis < dimension; axis++) {
+      sb.append("            coordinates[").append(axis).append("]");
+      if (axis + 1 < dimension) {
+        sb.append(",");
+      }
+      sb.append("\n");
+    }
+    sb.append("        );\n");
+    sb.append("    }\n\n");
+
+    sb.append("    /**\n");
+    sb.append("     * Interpolates using a coordinate array into a caller-supplied array.\n");
+    sb.append("     *\n");
+    sb.append("     * @param coordinates exactly ")
+        .append(dimension)
+        .append(" coordinate values\n");
+    sb.append("     * @param out destination array with length equal to outputs()\n");
+    sb.append(
+        "     * @throws IllegalArgumentException if coordinates is null or has the wrong length\n");
+    sb.append("     */\n");
+    sb.append("    @Override\n");
+    sb.append("    default void interpolate(double[] coordinates, double[] out) {\n");
+    appendVectorCoordinateValidation(sb, dimension, 2);
+    sb.append("        interpolate(\n");
+    for (int axis = 0; axis < dimension; axis++) {
+      sb.append("            coordinates[").append(axis).append("],\n");
+    }
+    sb.append("            out\n");
+    sb.append("        );\n");
+    sb.append("    }\n");
+
+    sb.append("}\n");
+    return sb.toString();
+  }
+
+  private void appendVectorCoordinateValidation(StringBuilder sb, int dimension, int indent) {
+    sb.append(indent(indent))
+        .append("if (coordinates == null || coordinates.length != ")
+        .append(dimension)
+        .append(") {\n");
+    sb.append(indent(indent + 1))
+        .append("throw new IllegalArgumentException(\"Expected ")
+        .append(dimension)
+        .append(" coordinates\");\n");
+    sb.append(indent(indent)).append("}\n");
   }
 
   private void appendBatchMethod(StringBuilder sb, int dimension) {
@@ -327,6 +500,10 @@ public final class InterpolatorSourceGenerator {
     sb.append("        }\n");
     sb.append("    }\n\n");
 
+    if (generateVectors) {
+      appendVectorErasedFactory(sb);
+    }
+
     for (int dimension = 1; dimension <= maxDimension; dimension++) {
       appendFlattenHelper(sb, dimension);
       appendTypedFactoryOverload(sb, dimension);
@@ -337,12 +514,45 @@ public final class InterpolatorSourceGenerator {
       if (dimension > 1) {
         appendArrayMultidimensionalFactory(sb, dimension);
       }
+      if (generateVectors) {
+        appendVectorTypedFactoryOverload(sb, dimension);
+        appendVectorArrayFactory(sb, dimension);
+      }
     }
 
     appendCheckedGridSize(sb);
 
     sb.append("}\n");
     return sb.toString();
+  }
+
+  private void appendVectorErasedFactory(StringBuilder sb) {
+    sb.append("    /**\n");
+    sb.append("     * Type-erased factory for vector-valued interpolators.\n");
+    sb.append("     *\n");
+    sb.append("     * @param axes coordinate axes in axis order\n");
+    sb.append("     * @param values values organized as values[outputIndex][flatGridIndex]\n");
+    sb.append("     * @return a generated vector-valued interpolator for the supplied dimension\n");
+    sb.append(
+        "     * @throws IllegalArgumentException if axes is null or has an unsupported length\n");
+    sb.append("     */\n");
+    sb.append(
+        "    public static VectorInterpolator createVector(double[][] axes, double[][] values) {\n");
+    sb.append("        if (axes == null) {\n");
+    sb.append("            throw new IllegalArgumentException(\"axes must not be null\");\n");
+    sb.append("        }\n");
+    sb.append("        switch (axes.length) {\n");
+    for (int dimension = 1; dimension <= maxDimension; dimension++) {
+      sb.append("            case ").append(dimension).append(":\n");
+      sb.append("                return createVector")
+          .append(dimension)
+          .append("D(axes, values);\n");
+    }
+    sb.append("            default:\n");
+    sb.append(
+        "                throw new IllegalArgumentException(\"Unsupported dimension: \" + axes.length);\n");
+    sb.append("        }\n");
+    sb.append("    }\n\n");
   }
 
   private void appendTypedFactoryOverload(StringBuilder sb, int dimension) {
@@ -378,6 +588,77 @@ public final class InterpolatorSourceGenerator {
       sb.append(COORD_NAMES[axis]);
     }
     sb.append(" }, values);\n");
+    sb.append("    }\n\n");
+  }
+
+  private void appendVectorTypedFactoryOverload(StringBuilder sb, int dimension) {
+    sb.append("    /**\n");
+    sb.append("     * Creates a typed ")
+        .append(dimension)
+        .append("D vector-valued interpolator from separate axes.\n");
+    sb.append("     *\n");
+    for (int axis = 0; axis < dimension; axis++) {
+      sb.append("     * @param ")
+          .append(COORD_NAMES[axis])
+          .append(" coordinate axis ")
+          .append(axis)
+          .append("\n");
+    }
+    sb.append("     * @param values values organized as values[outputIndex][flatGridIndex]\n");
+    sb.append("     * @return a typed ").append(dimension).append("D vector-valued interpolator\n");
+    sb.append("     * @throws IllegalArgumentException if axes or values are invalid\n");
+    sb.append("     */\n");
+    sb.append("    public static ").append(vectorInterfaceName(dimension)).append(" createVector(");
+    for (int axis = 0; axis < dimension; axis++) {
+      if (axis > 0) {
+        sb.append(", ");
+      }
+      sb.append("double[] ").append(COORD_NAMES[axis]);
+    }
+    sb.append(", double[][] values) {\n");
+    sb.append("        return createVector").append(dimension).append("D(new double[][] { ");
+    for (int axis = 0; axis < dimension; axis++) {
+      if (axis > 0) {
+        sb.append(", ");
+      }
+      sb.append(COORD_NAMES[axis]);
+    }
+    sb.append(" }, values);\n");
+    sb.append("    }\n\n");
+  }
+
+  private void appendVectorArrayFactory(StringBuilder sb, int dimension) {
+    sb.append("    /**\n");
+    sb.append("     * Creates a typed ")
+        .append(dimension)
+        .append("D vector-valued interpolator from an axis array.\n");
+    sb.append("     *\n");
+    sb.append("     * @param axes coordinate axes in axis order\n");
+    sb.append("     * @param values values organized as values[outputIndex][flatGridIndex]\n");
+    sb.append("     * @return a typed ").append(dimension).append("D vector-valued interpolator\n");
+    sb.append("     * @throws IllegalArgumentException if axes or values are invalid\n");
+    sb.append("     */\n");
+    sb.append("    public static ")
+        .append(vectorInterfaceName(dimension))
+        .append(" createVector")
+        .append(dimension)
+        .append("D(double[][] axes, double[][] values) {\n");
+    sb.append(
+            "        InterpolationSupport.PreparedVectorGrid grid = InterpolationSupport.prepareVector(")
+        .append(dimension)
+        .append(", axes, values);\n");
+    sb.append("        switch (grid.uniformMask) {\n");
+    int classCount = 1 << dimension;
+    for (int mask = 0; mask < classCount; mask++) {
+      sb.append("            case ").append(mask).append(":\n");
+      sb.append("                return new ")
+          .append(vectorImplementationName(dimension, mask))
+          .append("(grid.axes, grid.values);\n");
+    }
+    sb.append("            default:\n");
+    sb.append(
+        "                throw new AssertionError(\"Unexpected uniformity mask: \" + grid.uniformMask);\n");
+    sb.append("        }\n");
     sb.append("    }\n\n");
   }
 
@@ -675,10 +956,48 @@ public final class InterpolatorSourceGenerator {
     sb.append("            0.0);\n");
     sb.append("    }\n\n");
 
+    if (generateVectors) {
+      appendGeneratedVectorTests(sb);
+    }
+
     appendGeneratedTestHelpers(sb);
 
     sb.append("}\n");
     return sb.toString();
+  }
+
+  private void appendGeneratedVectorTests(StringBuilder sb) {
+    sb.append("    /**\n");
+    sb.append("     * Verifies every generated vector implementation against the reference.\n");
+    sb.append("     *\n");
+    sb.append("     * @throws Exception if generated reflection helpers fail\n");
+    sb.append("     */\n");
+    sb.append("    @Test\n");
+    sb.append(
+        "    public void vectorInterpolatorsMatchReferenceForAllMasks() throws Exception {\n");
+    sb.append("        for (int dimension = 1; dimension <= ")
+        .append(maxDimension)
+        .append("; dimension++) {\n");
+    sb.append("            int classCount = 1 << dimension;\n");
+    sb.append("            for (int mask = 0; mask < classCount; mask++) {\n");
+    sb.append("                double[][] axes = axesForMask(dimension, mask);\n");
+    sb.append("                double[][] values = vectorValuesForAxes(axes, 3);\n");
+    sb.append(
+        "                VectorInterpolator interpolator = Interpolators.createVector(axes, values);\n");
+    sb.append("                assertEquals(dimension, interpolator.dimensions());\n");
+    sb.append("                assertEquals(3, interpolator.outputs());\n");
+    sb.append("                assertEquals(\n");
+    sb.append("                    vectorImplementationName(dimension, mask),\n");
+    sb.append("                    interpolator.getClass().getSimpleName());\n");
+    sb.append("                assertVectorInterpolationMatchesReference(\n");
+    sb.append("                    interpolator, axes, values, firstCellMidpoint(axes));\n");
+    sb.append("                assertVectorInterpolationMatchesReference(\n");
+    sb.append("                    interpolator, axes, values, exactMiddlePoint(axes));\n");
+    sb.append("                assertVectorInterpolationMatchesReference(\n");
+    sb.append("                    interpolator, axes, values, clampedPoint(axes));\n");
+    sb.append("            }\n");
+    sb.append("        }\n");
+    sb.append("    }\n\n");
   }
 
   private void appendGeneratedTestHelpers(StringBuilder sb) {
@@ -686,6 +1005,9 @@ public final class InterpolatorSourceGenerator {
     appendGeneratedTestGridHelpers(sb);
     appendGeneratedTestPointHelpers(sb);
     appendGeneratedTestReferenceHelpers(sb);
+    if (generateVectors) {
+      appendGeneratedTestVectorHelpers(sb);
+    }
     appendGeneratedTestNestedArrayHelpers(sb);
     appendGeneratedTestNameHelpers(sb);
   }
@@ -974,6 +1296,64 @@ public final class InterpolatorSourceGenerator {
     sb.append("    }\n\n");
   }
 
+  private void appendGeneratedTestVectorHelpers(StringBuilder sb) {
+    sb.append("    /**\n");
+    sb.append(
+        "     * Compares generated vector interpolation with the reference implementation.\n");
+    sb.append("     *\n");
+    sb.append("     * @param interpolator generated vector interpolator under test\n");
+    sb.append("     * @param axes coordinate axes in axis order\n");
+    sb.append("     * @param values values organized as values[outputIndex][flatGridIndex]\n");
+    sb.append("     * @param point interpolation point in axis order\n");
+    sb.append("     */\n");
+    sb.append("    private static void assertVectorInterpolationMatchesReference(\n");
+    sb.append(
+        "        VectorInterpolator interpolator, double[][] axes, double[][] values, double[] point) {\n");
+    sb.append("        double[] expected = referenceVectorInterpolate(axes, values, point);\n");
+    sb.append("        assertArrayEquals(expected, interpolator.interpolate(point), EPSILON);\n");
+    sb.append("        double[] out = new double[interpolator.outputs()];\n");
+    sb.append("        interpolator.interpolate(point, out);\n");
+    sb.append("        assertArrayEquals(expected, out, EPSILON);\n");
+    sb.append("    }\n\n");
+
+    sb.append("    /**\n");
+    sb.append("     * Creates deterministic vector-valued sample rows for the supplied axes.\n");
+    sb.append("     *\n");
+    sb.append("     * @param axes coordinate axes in axis order\n");
+    sb.append("     * @param outputs output row count\n");
+    sb.append("     * @return values organized as values[outputIndex][flatGridIndex]\n");
+    sb.append("     */\n");
+    sb.append(
+        "    private static double[][] vectorValuesForAxes(double[][] axes, int outputs) {\n");
+    sb.append("        double[] base = valuesForAxes(axes);\n");
+    sb.append("        double[][] values = new double[outputs][base.length];\n");
+    sb.append("        for (int output = 0; output < outputs; output++) {\n");
+    sb.append("            for (int linear = 0; linear < base.length; linear++) {\n");
+    sb.append(
+        "                values[output][linear] = (output + 1.0) * base[linear] + 17.0 * output;\n");
+    sb.append("            }\n");
+    sb.append("        }\n");
+    sb.append("        return values;\n");
+    sb.append("    }\n\n");
+
+    sb.append("    /**\n");
+    sb.append("     * Independently computes all vector-valued interpolation outputs.\n");
+    sb.append("     *\n");
+    sb.append("     * @param axes coordinate axes in axis order\n");
+    sb.append("     * @param values values organized as values[outputIndex][flatGridIndex]\n");
+    sb.append("     * @param point interpolation point in axis order\n");
+    sb.append("     * @return reference output values\n");
+    sb.append("     */\n");
+    sb.append(
+        "    private static double[] referenceVectorInterpolate(double[][] axes, double[][] values, double[] point) {\n");
+    sb.append("        double[] out = new double[values.length];\n");
+    sb.append("        for (int output = 0; output < values.length; output++) {\n");
+    sb.append("            out[output] = referenceInterpolate(axes, values[output], point);\n");
+    sb.append("        }\n");
+    sb.append("        return out;\n");
+    sb.append("    }\n\n");
+  }
+
   private void appendGeneratedTestNameHelpers(StringBuilder sb) {
     sb.append("    /**\n");
     sb.append("     * Builds the generated implementation class name for a dimension and mask.\n");
@@ -990,21 +1370,22 @@ public final class InterpolatorSourceGenerator {
     sb.append("        }\n");
     sb.append("        return sb.toString();\n");
     sb.append("    }\n");
+    if (generateVectors) {
+      sb.append("\n\n");
+      sb.append("    /**\n");
+      sb.append("     * Builds the generated vector implementation class name.\n");
+      sb.append("     *\n");
+      sb.append("     * @param dimension grid dimension\n");
+      sb.append("     * @param mask uniform-axis bit mask\n");
+      sb.append("     * @return expected vector implementation simple class name\n");
+      sb.append("     */\n");
+      sb.append("    private static String vectorImplementationName(int dimension, int mask) {\n");
+      sb.append("        return \"Vector\" + implementationName(dimension, mask);\n");
+      sb.append("    }\n");
+    }
   }
 
-  private String generateSupport() {
-    StringBuilder sb = new StringBuilder();
-    sb.append(packageLine());
-    sb.append("import java.util.Arrays;\n\n");
-    sb.append("/**\n");
-    sb.append(" * Shared preparation helpers used by generated interpolators.\n");
-    sb.append(" */\n");
-    sb.append("final class InterpolationSupport {\n\n");
-    sb.append("    /**\n");
-    sb.append("     * Prevents instantiation of this utility class.\n");
-    sb.append("     */\n");
-    sb.append("    private InterpolationSupport() {}\n\n");
-
+  private void appendSupportPrepareScalar(StringBuilder sb) {
     sb.append("    /**\n");
     sb.append("     * Validates, sorts, and prepares an interpolation grid.\n");
     sb.append("     *\n");
@@ -1041,6 +1422,72 @@ public final class InterpolatorSourceGenerator {
     sb.append(
         "            throw new IllegalArgumentException(\"values length must equal the product of all axis lengths. Expected \" + expectedLength + \" but got \" + inputValues.length);\n");
     sb.append("        }\n\n");
+    appendSupportPreparedAxesBlock(sb);
+    sb.append("        double[] values = anyReordered\n");
+    sb.append("            ? reorderValues(inputValues, sizes, sortedAxes)\n");
+    sb.append("            : inputValues.clone();\n\n");
+    sb.append("        return new PreparedGrid(axes, values, uniformMask);\n");
+    sb.append("    }\n\n");
+  }
+
+  private void appendSupportPrepareVector(StringBuilder sb) {
+    sb.append("    /**\n");
+    sb.append("     * Validates, sorts, and prepares a vector-valued interpolation grid.\n");
+    sb.append("     *\n");
+    sb.append("     * @param dimensions expected number of axes\n");
+    sb.append("     * @param inputAxes input coordinate axes\n");
+    sb.append("     * @param inputValues values organized as values[outputIndex][flatGridIndex]\n");
+    sb.append("     * @return the prepared vector-valued grid\n");
+    sb.append("     * @throws IllegalArgumentException if axes or values are invalid\n");
+    sb.append("     */\n");
+    sb.append(
+        "    static PreparedVectorGrid prepareVector(int dimensions, double[][] inputAxes, double[][] inputValues) {\n");
+    sb.append("        if (inputAxes == null) {\n");
+    sb.append("            throw new IllegalArgumentException(\"axes must not be null\");\n");
+    sb.append("        }\n");
+    sb.append("        if (inputValues == null) {\n");
+    sb.append("            throw new IllegalArgumentException(\"values must not be null\");\n");
+    sb.append("        }\n");
+    sb.append("        if (inputValues.length == 0) {\n");
+    sb.append(
+        "            throw new IllegalArgumentException(\"values must contain at least one output row\");\n");
+    sb.append("        }\n");
+    sb.append("        if (inputAxes.length != dimensions) {\n");
+    sb.append(
+        "            throw new IllegalArgumentException(\"Expected \" + dimensions + \" axes but got \" + inputAxes.length);\n");
+    sb.append("        }\n\n");
+    sb.append("        SortedAxis[] sortedAxes = new SortedAxis[dimensions];\n");
+    sb.append("        int[] sizes = new int[dimensions];\n");
+    sb.append("        long expectedLength = 1L;\n\n");
+    sb.append("        for (int axis = 0; axis < dimensions; axis++) {\n");
+    sb.append("            sortedAxes[axis] = sortAxis(inputAxes[axis], axis);\n");
+    sb.append("            sizes[axis] = sortedAxes[axis].values.length;\n");
+    sb.append("            if (expectedLength > Integer.MAX_VALUE / (long) sizes[axis]) {\n");
+    sb.append("                throw new IllegalArgumentException(\"Grid is too large\");\n");
+    sb.append("            }\n");
+    sb.append("            expectedLength *= sizes[axis];\n");
+    sb.append("        }\n\n");
+    appendSupportPreparedAxesBlock(sb);
+    sb.append("        double[][] values = new double[inputValues.length][];\n");
+    sb.append("        for (int output = 0; output < inputValues.length; output++) {\n");
+    sb.append("            double[] row = inputValues[output];\n");
+    sb.append("            if (row == null) {\n");
+    sb.append(
+        "                throw new IllegalArgumentException(\"values contains a null output row\");\n");
+    sb.append("            }\n");
+    sb.append("            if (row.length != (int) expectedLength) {\n");
+    sb.append(
+        "                throw new IllegalArgumentException(\"Each output row length must equal the product of all axis lengths. Expected \" + expectedLength + \" but got \" + row.length);\n");
+    sb.append("            }\n");
+    sb.append("            values[output] = anyReordered\n");
+    sb.append("                ? reorderValues(row, sizes, sortedAxes)\n");
+    sb.append("                : row.clone();\n");
+    sb.append("        }\n\n");
+    sb.append("        return new PreparedVectorGrid(axes, values, uniformMask);\n");
+    sb.append("    }\n\n");
+  }
+
+  private void appendSupportPreparedAxesBlock(StringBuilder sb) {
     sb.append("        double[][] axes = new double[dimensions][];\n");
     sb.append("        boolean anyReordered = false;\n");
     sb.append("        int uniformMask = 0;\n\n");
@@ -1051,11 +1498,23 @@ public final class InterpolatorSourceGenerator {
     sb.append("                uniformMask |= 1 << axis;\n");
     sb.append("            }\n");
     sb.append("        }\n\n");
-    sb.append("        double[] values = anyReordered\n");
-    sb.append("            ? reorderValues(inputValues, sizes, sortedAxes)\n");
-    sb.append("            : inputValues.clone();\n\n");
-    sb.append("        return new PreparedGrid(axes, values, uniformMask);\n");
-    sb.append("    }\n\n");
+  }
+
+  private String generateSupport() {
+    StringBuilder sb = new StringBuilder();
+    sb.append(packageLine());
+    sb.append("import java.util.Arrays;\n\n");
+    sb.append("/**\n");
+    sb.append(" * Shared preparation helpers used by generated interpolators.\n");
+    sb.append(" */\n");
+    sb.append("final class InterpolationSupport {\n\n");
+    sb.append("    /**\n");
+    sb.append("     * Prevents instantiation of this utility class.\n");
+    sb.append("     */\n");
+    sb.append("    private InterpolationSupport() {}\n\n");
+
+    appendSupportPrepareScalar(sb);
+    appendSupportPrepareVector(sb);
 
     sb.append("    /**\n");
     sb.append("     * Locates the lower interpolation index for a sorted axis.\n");
@@ -1196,6 +1655,31 @@ public final class InterpolatorSourceGenerator {
     sb.append("         * @param uniformMask bit mask for uniformly spaced axes\n");
     sb.append("         */\n");
     sb.append("        PreparedGrid(double[][] axes, double[] values, int uniformMask) {\n");
+    sb.append("            this.axes = axes;\n");
+    sb.append("            this.values = values;\n");
+    sb.append("            this.uniformMask = uniformMask;\n");
+    sb.append("        }\n");
+    sb.append("    }\n\n");
+
+    sb.append("    /**\n");
+    sb.append("     * Prepared vector-valued grid data consumed by generated implementations.\n");
+    sb.append("     */\n");
+    sb.append("    static final class PreparedVectorGrid {\n");
+    sb.append("        /** Sorted axes in axis order. */\n");
+    sb.append("        final double[][] axes;\n");
+    sb.append("        /** Values organized as values[outputIndex][flatGridIndex]. */\n");
+    sb.append("        final double[][] values;\n");
+    sb.append("        /** Bit mask indicating which axes are uniformly spaced. */\n");
+    sb.append("        final int uniformMask;\n\n");
+    sb.append("        /**\n");
+    sb.append("         * Creates prepared vector-valued grid data.\n");
+    sb.append("         *\n");
+    sb.append("         * @param axes sorted axes in axis order\n");
+    sb.append("         * @param values output rows aligned to sorted axes\n");
+    sb.append("         * @param uniformMask bit mask for uniformly spaced axes\n");
+    sb.append("         */\n");
+    sb.append(
+        "        PreparedVectorGrid(double[][] axes, double[][] values, int uniformMask) {\n");
     sb.append("            this.axes = axes;\n");
     sb.append("            this.values = values;\n");
     sb.append("            this.uniformMask = uniformMask;\n");
@@ -1373,9 +1857,165 @@ public final class InterpolatorSourceGenerator {
     sb.append("        int base = ").append(baseExpression(dimension)).append(";\n\n");
     sb.append("        double[] data = values;\n\n");
 
-    appendCornerLoads(sb, dimension);
-    appendBlendCode(sb, dimension);
+    appendCornerLoads(sb, dimension, "data");
+    appendBlendCode(sb, dimension, "return ");
 
+    sb.append("    }\n");
+    sb.append("}\n");
+    return sb.toString();
+  }
+
+  private String generateVectorImplementation(int dimension, int uniformMask) {
+    StringBuilder sb = new StringBuilder();
+    sb.append(packageLine());
+
+    String className = vectorImplementationName(dimension, uniformMask);
+    String interfaceName = vectorInterfaceName(dimension);
+
+    sb.append("/**\n");
+    sb.append(" * Generated ")
+        .append(dimension)
+        .append("D vector-valued interpolator for ")
+        .append(patternName(dimension, uniformMask))
+        .append(" axes.\n");
+    sb.append(" */\n");
+    sb.append("final class ")
+        .append(className)
+        .append(" implements ")
+        .append(interfaceName)
+        .append(" {\n\n");
+
+    sb.append("    /** Values organized as values[outputIndex][flatGridIndex]. */\n");
+    sb.append("    private final double[][] values;\n\n");
+    sb.append("    /** Number of output values computed for each interpolation point. */\n");
+    sb.append("    private final int outputCount;\n\n");
+    for (int axis = 0; axis < dimension; axis++) {
+      sb.append("    /** Number of points on axis ").append(axis).append(". */\n");
+      sb.append("    private final int n").append(axis).append(";\n");
+    }
+    sb.append("\n");
+    for (int axis = 1; axis < dimension; axis++) {
+      sb.append("    /** Linear stride for axis ").append(axis).append(". */\n");
+      sb.append("    private final int stride").append(axis).append(";\n");
+    }
+    if (dimension > 1) {
+      sb.append("\n");
+    }
+
+    for (int axis = 0; axis < dimension; axis++) {
+      if (isUniform(uniformMask, axis)) {
+        sb.append("    /** First coordinate on uniform axis ").append(axis).append(". */\n");
+        sb.append("    private final double axis").append(axis).append("First;\n");
+        sb.append("    /** Reciprocal step size for uniform axis ").append(axis).append(". */\n");
+        sb.append("    private final double axis").append(axis).append("InvStep;\n\n");
+      } else {
+        sb.append("    /** Sorted coordinate values for non-uniform axis ")
+            .append(axis)
+            .append(". */\n");
+        sb.append("    private final double[] axis").append(axis).append(";\n");
+        sb.append("    /** First coordinate on non-uniform axis ").append(axis).append(". */\n");
+        sb.append("    private final double axis").append(axis).append("First;\n");
+        sb.append("    /** Last coordinate on non-uniform axis ").append(axis).append(". */\n");
+        sb.append("    private final double axis").append(axis).append("Last;\n\n");
+      }
+    }
+
+    sb.append("    /**\n");
+    sb.append("     * Creates a generated vector-valued interpolator from prepared data.\n");
+    sb.append("     *\n");
+    sb.append("     * @param axes sorted axes in axis order\n");
+    sb.append("     * @param values output rows aligned to the sorted axes\n");
+    sb.append("     */\n");
+    sb.append("    ").append(className).append("(double[][] axes, double[][] values) {\n");
+    sb.append("        this.values = values;\n");
+    sb.append("        this.outputCount = values.length;\n\n");
+    for (int axis = 0; axis < dimension; axis++) {
+      sb.append("        this.n")
+          .append(axis)
+          .append(" = axes[")
+          .append(axis)
+          .append("].length;\n");
+    }
+    if (dimension > 1) {
+      sb.append("\n");
+      for (int axis = 1; axis < dimension; axis++) {
+        sb.append("        this.stride").append(axis).append(" = ");
+        for (int term = 0; term < axis; term++) {
+          if (term > 0) {
+            sb.append(" * ");
+          }
+          sb.append("n").append(term);
+        }
+        sb.append(";\n");
+      }
+    }
+    sb.append("\n");
+
+    for (int axis = 0; axis < dimension; axis++) {
+      if (isUniform(uniformMask, axis)) {
+        sb.append("        this.axis")
+            .append(axis)
+            .append("First = axes[")
+            .append(axis)
+            .append("][0];\n");
+        sb.append("        this.axis")
+            .append(axis)
+            .append("InvStep = 1.0 / (axes[")
+            .append(axis)
+            .append("][1] - axes[")
+            .append(axis)
+            .append("][0]);\n");
+      } else {
+        sb.append("        this.axis").append(axis).append(" = axes[").append(axis).append("];\n");
+        sb.append("        this.axis")
+            .append(axis)
+            .append("First = axes[")
+            .append(axis)
+            .append("][0];\n");
+        sb.append("        this.axis")
+            .append(axis)
+            .append("Last = axes[")
+            .append(axis)
+            .append("][n")
+            .append(axis)
+            .append(" - 1];\n");
+      }
+      if (axis + 1 < dimension) {
+        sb.append("\n");
+      }
+    }
+    sb.append("    }\n\n");
+
+    sb.append("    /**\n");
+    sb.append(
+        "     * Returns the number of output values computed for each interpolation point.\n");
+    sb.append("     *\n");
+    sb.append("     * @return the output value count\n");
+    sb.append("     */\n");
+    sb.append("    @Override\n");
+    sb.append("    public int outputs() {\n");
+    sb.append("        return outputCount;\n");
+    sb.append("    }\n\n");
+
+    appendVectorTypedInterpolateJavadocs(sb, "    ", dimension, true);
+    sb.append("    @Override\n");
+    sb.append("    public ").append(vectorTypedOutputMethodSignature(dimension)).append(" {\n");
+    sb.append("        if (out == null || out.length != outputCount) {\n");
+    sb.append(
+        "            throw new IllegalArgumentException(\"out length must equal outputs()\");\n");
+    sb.append("        }\n\n");
+
+    for (int axis = 0; axis < dimension; axis++) {
+      appendAxisLookup(sb, dimension, uniformMask, axis);
+    }
+
+    sb.append("        int base = ").append(baseExpression(dimension)).append(";\n\n");
+    sb.append("        double[][] data = values;\n");
+    sb.append("        for (int output = 0; output < outputCount; output++) {\n");
+    sb.append("            double[] outputValues = data[output];\n\n");
+    appendCornerLoads(sb, dimension, "outputValues", 3);
+    appendBlendCode(sb, dimension, "out[output] = ", 3);
+    sb.append("        }\n");
     sb.append("    }\n");
     sb.append("}\n");
     return sb.toString();
@@ -1455,19 +2095,30 @@ public final class InterpolatorSourceGenerator {
     }
   }
 
-  private void appendCornerLoads(StringBuilder sb, int dimension) {
+  private void appendCornerLoads(StringBuilder sb, int dimension, String dataName) {
+    appendCornerLoads(sb, dimension, dataName, 2);
+  }
+
+  private void appendCornerLoads(StringBuilder sb, int dimension, String dataName, int indent) {
     int corners = 1 << dimension;
     for (int mask = 0; mask < corners; mask++) {
-      sb.append("        double ")
+      sb.append(indent(indent))
+          .append("double ")
           .append(valueVar(mask, dimension))
-          .append(" = data[")
+          .append(" = ")
+          .append(dataName)
+          .append("[")
           .append(offsetExpression(mask, dimension))
           .append("];\n");
     }
     sb.append("\n");
   }
 
-  private void appendBlendCode(StringBuilder sb, int dimension) {
+  private void appendBlendCode(StringBuilder sb, int dimension, String resultPrefix) {
+    appendBlendCode(sb, dimension, resultPrefix, 2);
+  }
+
+  private void appendBlendCode(StringBuilder sb, int dimension, String resultPrefix, int indent) {
     int corners = 1 << dimension;
     String[] variableByMask = new String[corners];
     List<Integer> activeMasks = new ArrayList<Integer>();
@@ -1491,7 +2142,8 @@ public final class InterpolatorSourceGenerator {
         String upper = variableByMask[upperMask];
         String blended = blendVar(axis, lowerMask, dimension);
 
-        sb.append("        double ")
+        sb.append(indent(indent))
+            .append("double ")
             .append(blended)
             .append(" = ")
             .append(lower)
@@ -1516,7 +2168,7 @@ public final class InterpolatorSourceGenerator {
     }
 
     sb.append("\n");
-    sb.append("        return ").append(variableByMask[0]).append(";\n");
+    sb.append(indent(indent)).append(resultPrefix).append(variableByMask[0]).append(";\n");
   }
 
   private String typedMethodSignature(int dimension) {
@@ -1529,6 +2181,35 @@ public final class InterpolatorSourceGenerator {
       sb.append("double ").append(COORD_NAMES[axis]);
     }
     sb.append(")");
+    return sb.toString();
+  }
+
+  private String vectorTypedAllocatingMethodSignature(int dimension) {
+    StringBuilder sb = new StringBuilder();
+    sb.append("default double[] interpolate(");
+    for (int axis = 0; axis < dimension; axis++) {
+      if (axis > 0) {
+        sb.append(", ");
+      }
+      sb.append("double ").append(COORD_NAMES[axis]);
+    }
+    sb.append(")");
+    return sb.toString();
+  }
+
+  private String vectorTypedOutputMethodSignature(int dimension) {
+    StringBuilder sb = new StringBuilder();
+    sb.append("void interpolate(");
+    for (int axis = 0; axis < dimension; axis++) {
+      if (axis > 0) {
+        sb.append(", ");
+      }
+      sb.append("double ").append(COORD_NAMES[axis]);
+    }
+    if (dimension > 0) {
+      sb.append(", ");
+    }
+    sb.append("double[] out)");
     return sb.toString();
   }
 
@@ -1548,6 +2229,36 @@ public final class InterpolatorSourceGenerator {
           .append("\n");
     }
     sb.append(indent).append(" * @return the interpolated value, clamped to the grid bounds\n");
+    sb.append(indent).append(" */\n");
+  }
+
+  private void appendVectorTypedInterpolateJavadocs(
+      StringBuilder sb, String indent, int dimension, boolean writesToOut) {
+    sb.append(indent).append("/**\n");
+    sb.append(indent)
+        .append(" * Interpolates all output values at the supplied ")
+        .append(dimension)
+        .append("D coordinate");
+    if (writesToOut) {
+      sb.append(" into a caller-supplied array");
+    }
+    sb.append(".\n");
+    sb.append(indent).append(" *\n");
+    for (int axis = 0; axis < dimension; axis++) {
+      sb.append(indent)
+          .append(" * @param ")
+          .append(COORD_NAMES[axis])
+          .append(" coordinate for axis ")
+          .append(axis)
+          .append("\n");
+    }
+    if (writesToOut) {
+      sb.append(indent).append(" * @param out destination array with length equal to outputs()\n");
+      sb.append(indent)
+          .append(" * @throws IllegalArgumentException if out is null or has the wrong length\n");
+    } else {
+      sb.append(indent).append(" * @return a new array containing interpolated output values\n");
+    }
     sb.append(indent).append(" */\n");
   }
 
@@ -1652,8 +2363,16 @@ public final class InterpolatorSourceGenerator {
     return "Interpolator" + dimension + "D";
   }
 
+  private String vectorInterfaceName(int dimension) {
+    return "VectorInterpolator" + dimension + "D";
+  }
+
   private String implementationName(int dimension, int mask) {
     return "Interpolator" + dimension + "D_" + patternName(dimension, mask);
+  }
+
+  private String vectorImplementationName(int dimension, int mask) {
+    return "VectorInterpolator" + dimension + "D_" + patternName(dimension, mask);
   }
 
   private String arrayName(int axis) {

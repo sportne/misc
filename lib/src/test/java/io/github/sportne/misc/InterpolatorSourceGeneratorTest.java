@@ -51,6 +51,20 @@ public class InterpolatorSourceGeneratorTest {
   }
 
   @Test
+  public void generatesAndCompilesVectorInterpolatorsThroughFiveDimensions() throws Exception {
+    GeneratedProject project = generateAndCompile(5, true);
+
+    assertEquals(138, countJavaSources(project.sourceRoot));
+    assertGeneratedFile(project, "VectorInterpolator.java");
+    assertGeneratedFile(project, "VectorInterpolator5D.java");
+    assertGeneratedFile(project, "VectorInterpolator5D_UUUUU.java");
+
+    Class<?> interpolators = project.loadClass("Interpolators");
+    assertNotNull(interpolators.getMethod("createVector", double[][].class, double[][].class));
+    assertNotNull(interpolators.getMethod("createVector5D", double[][].class, double[][].class));
+  }
+
+  @Test
   public void generatesCompilesAndRunsOptionalJUnitTests() throws Exception {
     Path sourceRoot = temporaryFolder.newFolder("generated-src-with-tests").toPath();
     Path testSourceRoot = temporaryFolder.newFolder("generated-test-src").toPath();
@@ -89,6 +103,44 @@ public class InterpolatorSourceGeneratorTest {
   }
 
   @Test
+  public void generatesCompilesAndRunsOptionalVectorJUnitTests() throws Exception {
+    Path sourceRoot = temporaryFolder.newFolder("generated-vector-src-with-tests").toPath();
+    Path testSourceRoot = temporaryFolder.newFolder("generated-vector-test-src").toPath();
+    Path classes = temporaryFolder.newFolder("generated-vector-classes-with-tests").toPath();
+    Path testClasses = temporaryFolder.newFolder("generated-vector-test-classes").toPath();
+
+    InterpolatorSourceGenerator.main(
+        new String[] {
+          sourceRoot.toString(),
+          GENERATED_PACKAGE,
+          "5",
+          "--vectors",
+          "--tests",
+          testSourceRoot.toString()
+        });
+
+    List<Path> productionSources = javaSources(sourceRoot);
+    List<Path> testSources = javaSources(testSourceRoot);
+    assertEquals(138, productionSources.size());
+    assertEquals(1, testSources.size());
+
+    compileSources(productionSources, classes, null);
+    compileSources(
+        testSources,
+        testClasses,
+        classes.toString() + File.pathSeparator + System.getProperty("java.class.path"));
+
+    URL[] urls = new URL[] {testClasses.toUri().toURL(), classes.toUri().toURL()};
+    try (URLClassLoader classLoader = new URLClassLoader(urls, getClass().getClassLoader())) {
+      Class<?> generatedTestClass =
+          classLoader.loadClass(GENERATED_PACKAGE + ".InterpolatorsGeneratedTest");
+      Result result = JUnitCore.runClasses(generatedTestClass);
+      assertTrue(result.getFailures().toString(), result.wasSuccessful());
+      assertEquals(3, result.getRunCount());
+    }
+  }
+
+  @Test
   public void generatedSourcesContainRepresentativeJavadocs() throws Exception {
     GeneratedProject project = generateAndCompile(2);
 
@@ -112,6 +164,25 @@ public class InterpolatorSourceGeneratorTest {
     String support = readGeneratedSource(project, "InterpolationSupport.java");
     assertTrue(support.contains("@param dimensions expected number of axes"));
     assertTrue(support.contains("/** Sorted axis values. */"));
+  }
+
+  @Test
+  public void generatedVectorSourcesContainRepresentativeJavadocs() throws Exception {
+    GeneratedProject project = generateAndCompile(2, true);
+
+    String vectorInterpolator = readGeneratedSource(project, "VectorInterpolator.java");
+    assertTrue(vectorInterpolator.contains("@return the output value count"));
+    assertTrue(vectorInterpolator.contains("@param out destination array"));
+
+    String interpolators = readGeneratedSource(project, "Interpolators.java");
+    assertTrue(interpolators.contains("Type-erased factory for vector-valued interpolators."));
+    assertTrue(interpolators.contains("values[outputIndex][flatGridIndex]"));
+
+    String implementation = readGeneratedSource(project, "VectorInterpolator2D_UN.java");
+    assertTrue(implementation.contains("Generated 2D vector-valued interpolator"));
+    assertTrue(implementation.contains("@return the output value count"));
+    assertTrue(
+        implementation.contains("@param out destination array with length equal to outputs()"));
   }
 
   @Test
@@ -196,6 +267,46 @@ public class InterpolatorSourceGeneratorTest {
   }
 
   @Test
+  public void generatedVectorInterpolatorsMatchReferenceForAllMasksThroughFiveDimensions()
+      throws Exception {
+    GeneratedProject project = generateAndCompile(5, true);
+    Class<?> interpolators = project.loadClass("Interpolators");
+
+    for (int dimension = 1; dimension <= 5; dimension++) {
+      int classCount = 1 << dimension;
+      for (int mask = 0; mask < classCount; mask++) {
+        double[][] axes = axesForMask(dimension, mask);
+        double[][] values = vectorValuesForAxes(axes, 3);
+        Object interpolator = createVector(interpolators, dimension, axes, values);
+
+        assertEquals(
+            vectorImplementationName(dimension, mask), interpolator.getClass().getSimpleName());
+        assertVectorInterpolationMatchesReference(
+            project, interpolator, axes, values, firstCellMidpoint(axes));
+        assertVectorInterpolationMatchesReference(
+            project, interpolator, axes, values, exactMiddlePoint(axes));
+        assertVectorInterpolationMatchesReference(
+            project, interpolator, axes, values, clampedPoint(axes));
+      }
+    }
+  }
+
+  @Test
+  public void vectorInterpolatorsReorderEveryOutputRowForUnsortedAxes() throws Exception {
+    GeneratedProject project = generateAndCompile(5, true);
+    Class<?> interpolators = project.loadClass("Interpolators");
+
+    double[][] unsortedAxes = {{2.0, 0.0, 1.0}, {4.0, -2.0, 1.0}};
+    double[][] sortedAxes = {{0.0, 1.0, 2.0}, {-2.0, 1.0, 4.0}};
+    double[][] valuesInOriginalOrder = vectorValuesForAxes(unsortedAxes, 3);
+    double[][] valuesInSortedOrder = vectorValuesForAxes(sortedAxes, 3);
+    Object interpolator = createVector(interpolators, 2, unsortedAxes, valuesInOriginalOrder);
+
+    assertVectorInterpolationMatchesReference(
+        project, interpolator, sortedAxes, valuesInSortedOrder, new double[] {0.5, 0.25});
+  }
+
+  @Test
   public void multidimensionalFactoriesMatchFlatFactories() throws Exception {
     GeneratedProject project = generateAndCompile(5);
     Class<?> interpolators = project.loadClass("Interpolators");
@@ -236,6 +347,50 @@ public class InterpolatorSourceGeneratorTest {
         Arrays.copyOf(axes, 3),
         valuesForAxes(Arrays.copyOf(axes, 3)),
         new double[] {-0.25, 2.5, 3.0});
+  }
+
+  @Test
+  public void vectorValidationApisRejectInvalidInputs() throws Exception {
+    GeneratedProject project = generateAndCompile(5, true);
+    Class<?> interpolators = project.loadClass("Interpolators");
+
+    double[][] axes = {{0.0, 1.0}, {0.0, 2.0}};
+    double[][] values = vectorValuesForAxes(axes, 3);
+
+    assertIllegalArgument(() -> createVector(interpolators, 2, axes, null));
+    assertIllegalArgument(() -> createVector(interpolators, 2, axes, new double[0][]));
+    assertIllegalArgument(() -> createVector(interpolators, 2, axes, new double[][] {null}));
+    assertIllegalArgument(
+        () -> createVector(interpolators, 2, axes, new double[][] {{1.0, 2.0, 3.0}}));
+    assertIllegalArgument(
+        () ->
+            createVector(
+                interpolators, 1, new double[][] {{0.0, 0.0}}, new double[][] {{1.0, 2.0}}));
+    assertIllegalArgument(
+        () ->
+            createVector(
+                interpolators,
+                1,
+                new double[][] {{0.0, Double.POSITIVE_INFINITY}},
+                new double[][] {{1.0, 2.0}}));
+
+    Object vectorInterpolator = createVector(interpolators, 2, axes, values);
+    Method typedInterpolate =
+        project
+            .loadClass("VectorInterpolator2D")
+            .getMethod("interpolate", double.class, double.class, double[].class);
+    assertIllegalArgument(() -> typedInterpolate.invoke(vectorInterpolator, 0.5, 1.0, null));
+    assertIllegalArgument(
+        () -> typedInterpolate.invoke(vectorInterpolator, 0.5, 1.0, new double[2]));
+
+    Method coordinateArrayInterpolate =
+        project
+            .loadClass("VectorInterpolator")
+            .getMethod("interpolate", double[].class, double[].class);
+    assertIllegalArgument(
+        () ->
+            coordinateArrayInterpolate.invoke(
+                vectorInterpolator, new double[] {0.5}, new double[3]));
   }
 
   @Test
@@ -290,11 +445,22 @@ public class InterpolatorSourceGeneratorTest {
   }
 
   private GeneratedProject generateAndCompile(int maxDimension) throws Exception {
+    return generateAndCompile(maxDimension, false);
+  }
+
+  private GeneratedProject generateAndCompile(int maxDimension, boolean vectors) throws Exception {
     Path sourceRoot = temporaryFolder.newFolder("generated-src").toPath();
     Path classes = temporaryFolder.newFolder("generated-classes").toPath();
 
-    InterpolatorSourceGenerator.main(
-        new String[] {sourceRoot.toString(), GENERATED_PACKAGE, Integer.toString(maxDimension)});
+    if (vectors) {
+      InterpolatorSourceGenerator.main(
+          new String[] {
+            sourceRoot.toString(), GENERATED_PACKAGE, Integer.toString(maxDimension), "--vectors"
+          });
+    } else {
+      InterpolatorSourceGenerator.main(
+          new String[] {sourceRoot.toString(), GENERATED_PACKAGE, Integer.toString(maxDimension)});
+    }
 
     List<Path> sources = javaSources(sourceRoot);
     compileSources(sources, classes, null);
@@ -372,6 +538,14 @@ public class InterpolatorSourceGeneratorTest {
     return method.invoke(null, axes, values);
   }
 
+  private static Object createVector(
+      Class<?> interpolators, int dimension, double[][] axes, double[][] values) throws Exception {
+    Method method =
+        interpolators.getMethod(
+            "createVector" + dimension + "D", double[][].class, double[][].class);
+    return method.invoke(null, axes, values);
+  }
+
   private static double invokeTypedInterpolate(
       GeneratedProject project, Object interpolator, int dimension, double[] coordinates)
       throws Exception {
@@ -382,6 +556,24 @@ public class InterpolatorSourceGeneratorTest {
       arguments[i] = coordinates[i];
     }
     return (Double) method.invoke(interpolator, arguments);
+  }
+
+  private static double[] invokeTypedVectorInterpolate(
+      GeneratedProject project, Object interpolator, int dimension, double[] coordinates)
+      throws Exception {
+    Class<?> interfaceType = project.loadClass("VectorInterpolator" + dimension + "D");
+    Class<?>[] parameterTypes = Arrays.copyOf(repeatedDoubleTypes(dimension), dimension + 1);
+    parameterTypes[dimension] = double[].class;
+    Method method = interfaceType.getMethod("interpolate", parameterTypes);
+    Method outputsMethod = project.loadClass("VectorInterpolator").getMethod("outputs");
+    double[] out = new double[(Integer) outputsMethod.invoke(interpolator)];
+    Object[] arguments = new Object[dimension + 1];
+    for (int i = 0; i < dimension; i++) {
+      arguments[i] = coordinates[i];
+    }
+    arguments[dimension] = out;
+    method.invoke(interpolator, arguments);
+    return out;
   }
 
   private static void assertInterpolationMatchesReference(
@@ -395,6 +587,19 @@ public class InterpolatorSourceGeneratorTest {
     assertEquals(
         referenceInterpolate(axes, values, point),
         invokeTypedInterpolate(project, interpolator, axes.length, point),
+        EPSILON);
+  }
+
+  private static void assertVectorInterpolationMatchesReference(
+      GeneratedProject project,
+      Object interpolator,
+      double[][] axes,
+      double[][] values,
+      double[] point)
+      throws Exception {
+    assertArrayEquals(
+        referenceVectorInterpolate(axes, values, point),
+        invokeTypedVectorInterpolate(project, interpolator, axes.length, point),
         EPSILON);
   }
 
@@ -422,6 +627,17 @@ public class InterpolatorSourceGeneratorTest {
     for (int linear = 0; linear < total; linear++) {
       values[linear] = sampleValue(axes, indices);
       increment(indices, sizes);
+    }
+    return values;
+  }
+
+  private static double[][] vectorValuesForAxes(double[][] axes, int outputs) {
+    double[] base = valuesForAxes(axes);
+    double[][] values = new double[outputs][base.length];
+    for (int output = 0; output < outputs; output++) {
+      for (int linear = 0; linear < base.length; linear++) {
+        values[output][linear] = (output + 1.0) * base[linear] + 17.0 * output;
+      }
     }
     return values;
   }
@@ -512,6 +728,15 @@ public class InterpolatorSourceGeneratorTest {
     return result;
   }
 
+  private static double[] referenceVectorInterpolate(
+      double[][] axes, double[][] values, double[] point) {
+    double[] out = new double[values.length];
+    for (int output = 0; output < values.length; output++) {
+      out[output] = referenceInterpolate(axes, values[output], point);
+    }
+    return out;
+  }
+
   private static int lowerIndex(double[] axis, double value) {
     int low = 0;
     int high = axis.length - 1;
@@ -587,6 +812,10 @@ public class InterpolatorSourceGeneratorTest {
       sb.append((mask & (1 << axis)) == 0 ? 'N' : 'U');
     }
     return sb.toString();
+  }
+
+  private static String vectorImplementationName(int dimension, int mask) {
+    return "Vector" + implementationName(dimension, mask);
   }
 
   private static void assertIllegalArgument(ThrowingRunnable runnable) throws Exception {
